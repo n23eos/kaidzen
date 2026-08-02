@@ -112,6 +112,11 @@ class RunState(BaseModel):
     # привязка «что нашли именно сейчас», поэтому без этого поля
     # возобновление после шага researcher было бы с потерей данных.
     pending_findings: Optional[str] = None
+    # критика последнего Judge — вход следующего Refiner.
+    # Хранится отдельно от версии специально ради откатов: у откаченной версии
+    # judge не сохраняется, а именно её критика объясняет, что пошло не так,
+    # и без неё следующая итерация повторит ту же ошибку.
+    last_critique: list[str] = Field(default_factory=list)
     api_usage: ApiUsage = Field(default_factory=ApiUsage)
 
     def current_version(self) -> Optional[Version]:

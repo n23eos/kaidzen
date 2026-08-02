@@ -77,6 +77,20 @@ def test_runstate_roundtrip():
     assert s2.pending_findings is None
 
 
+def test_runstate_last_critique_defaults_to_empty():
+    s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i")
+    assert s.last_critique == []
+
+
+def test_runstate_keeps_last_critique_across_save(tmp_path: Path):
+    # критика последнего Judge переживает перезапуск: её ждёт следующий Refiner,
+    # в том числе после отката, когда версия с этой критикой выброшена
+    s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i",
+                 last_critique=["слишком общо"])
+    save_state(s, tmp_path)
+    assert load_state(tmp_path).last_critique == ["слишком общо"]
+
+
 def test_runstate_keeps_pending_findings_across_save(tmp_path: Path):
     # находки Researcher должны переживать перезапуск: их ждёт Refiner
     s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i",
