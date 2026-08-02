@@ -242,9 +242,18 @@ class FakeSummaryLLM:
     def __init__(self, summary: str):
         self.usage = ApiUsage(input_tokens=11, output_tokens=22, web_searches=3)
         self._summary = summary
+        self.calls = []
 
     def structured(self, **kwargs):
+        self.calls.append(kwargs)
         return cli.SummaryOutput(summary=self._summary)
+
+
+def with_reporter(candidate, model: str = "reporter-model"):
+    """Кандидат с пятой моделью reporter — как в поставляемых config.yaml."""
+    models = {**candidate.config.models, cli.REPORTER_ROLE: model}
+    config = candidate.config.model_copy(update={"models": models})
+    return candidate.model_copy(update={"config": config})
 
 
 def make_judge(total: float, delta: float) -> JudgeResult:
@@ -318,19 +327,24 @@ def test_progress_printer_judge_reports_rollback(capsys):
     assert "откачена" in capsys.readouterr().out
 
 
-def test_finish_run_writes_report_with_summary_and_prints_usage(tmp_path, capsys):
+def make_finished_state(run_dir: Path) -> RunState:
+    return RunState(run_id=run_dir.name, candidate_id="gen000-generic",
+                    config={}, original_idea="Сырая идея.",
+                    stop_reason="plateau", iteration=1,
+                    versions=[Version(n=1, idea_text="Доведённая идея.",
+                                      judge=make_judge(8.0, 1.5))])
+
+
+def test_finish_run_writes_report_with_summary_and_prints_usage(
+        tmp_path, capsys, candidate):
     # Arrange
     run_dir = tmp_path / "2026-08-03-1215-idea"
     run_dir.mkdir()
-    state = RunState(run_id=run_dir.name, candidate_id="gen000-generic",
-                     config={}, original_idea="Сырая идея.",
-                     stop_reason="plateau", iteration=1,
-                     versions=[Version(n=1, idea_text="Доведённая идея.",
-                                       judge=make_judge(8.0, 1.5))])
+    state = make_finished_state(run_dir)
     llm = FakeSummaryLLM("Короткое резюме идеи.")
 
     # Act
-    cli._finish_run(llm, state, run_dir)
+    cli._finish_run(llm, with_reporter(candidate), state, run_dir)
 
     # Assert
     report = (run_dir / "report.md").read_text(encoding="utf-8")
@@ -341,6 +355,45 @@ def test_finish_run_writes_report_with_summary_and_prints_usage(tmp_path, capsys
     assert "11 входных, 22 выходных" in out and "веб-поисков: 3" in out
     # расход на резюме должен осесть и в state.json, а не только в отчёте
     assert load_state(run_dir).api_usage.input_tokens == 11
+
+
+def test_summary_model_comes_from_candidate_config(tmp_path, candidate):
+    """Имена моделей живут в конфиге кандидата, а не в коде CLI."""
+    # Arrange
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    llm = FakeSummaryLLM("резюме")
+
+    # Act
+    cli._finish_run(llm, with_reporter(candidate, "модель-репортёра"),
+                    make_finished_state(run_dir), run_dir)
+
+    # Assert
+    assert llm.calls[0]["model"] == "модель-репортёра"
+
+
+def test_cli_has_no_hardcoded_model_name():
+    assert not hasattr(cli, "SUMMARY_MODEL")
+
+
+def test_summary_call_sends_effort_and_no_temperature(tmp_path, candidate):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    llm = FakeSummaryLLM("резюме")
+
+    cli._finish_run(llm, with_reporter(candidate), make_finished_state(run_dir),
+                    run_dir)
+
+    call = llm.calls[0]
+    assert call["effort"] == cli.SUMMARY_EFFORT
+    assert "temperature" not in call
+
+
+@pytest.mark.parametrize("domain", ["generic", "business", "games"])
+def test_shipped_candidates_declare_reporter_model(domain):
+    from kaidzen.candidate import load_candidate
+    candidate = load_candidate(Path("candidates") / f"gen000-{domain}")
+    assert candidate.config.models[cli.REPORTER_ROLE].strip()
 
 
 def test_print_start_shows_run_and_candidate(candidate, capsys):

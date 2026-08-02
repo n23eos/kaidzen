@@ -16,3 +16,4 @@ models:
   researcher: claude-sonnet-5
   refiner: claude-sonnet-5
   judge: claude-sonnet-5
+  reporter: claude-sonnet-5

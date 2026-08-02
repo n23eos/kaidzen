@@ -21,8 +21,11 @@ from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
 from kaidzen.report import build_report
 from kaidzen.state import ApiUsage, RunState, load_state, save_state
 
-SUMMARY_MODEL = "claude-sonnet-5"
-SUMMARY_TEMPERATURE = 0.2
+# модель резюме берётся из config.yaml кандидата (ключ models.reporter):
+# имена моделей живут в конфиге, чтобы мета-цикл мог их развивать
+REPORTER_ROLE = "reporter"
+# пересказ готового текста без домысливания
+SUMMARY_EFFORT = "low"
 SUMMARY_SYSTEM = (
     "Ты пишешь executive summary по финальной версии идеи. "
     "Дай 3–5 предложений: что за идея, для кого, как работает и что "
@@ -176,11 +179,11 @@ def _read_idea(idea_path: Path) -> str:
     return idea_path.read_text(encoding="utf-8")
 
 
-def _generate_summary(llm, state: RunState) -> str:
+def _generate_summary(llm, candidate: Candidate, state: RunState) -> str:
     """Единственный вызов LLM вне цикла: короткое резюме финальной идеи."""
-    out = llm.structured(model=SUMMARY_MODEL, system=SUMMARY_SYSTEM,
+    out = llm.structured(model=_reporter_model(candidate), system=SUMMARY_SYSTEM,
                          user=state.current_idea_text(), schema=SummaryOutput,
-                         temperature=SUMMARY_TEMPERATURE)
+                         effort=SUMMARY_EFFORT)
     state.api_usage = ApiUsage.model_validate(llm.usage, from_attributes=True)
     return out.summary
 
@@ -192,13 +195,24 @@ def _write_report(state: RunState, run_dir: Path, summary_text: str) -> Path:
     return report_path
 
 
-def _finish_run(llm, state: RunState, run_dir: Path) -> None:
+def _reporter_model(candidate: Candidate) -> str:
+    """Модель для executive summary. Отсутствие ключа — ошибка конфига."""
+    model = candidate.config.models.get(REPORTER_ROLE)
+    if not model or not model.strip():
+        raise ValueError(
+            f"в config.yaml кандидата {candidate.candidate_id} не задана "
+            f"модель models.{REPORTER_ROLE} для executive summary")
+    return model
+
+
+def _finish_run(llm, candidate: Candidate, state: RunState,
+                run_dir: Path) -> None:
     """Общий хвост run и resume: резюме, отчёт, итоговая сводка.
 
     Ход итераций пользователь уже видел вживую через ProgressPrinter — здесь
     печатается только финальная сводка, без повторного прохода по versions.
     """
-    summary = _generate_summary(llm, state)
+    summary = _generate_summary(llm, candidate, state)
     save_state(state, run_dir)  # расход на резюме тоже должен попасть в state
     _print_finish(state, _write_report(state, run_dir, summary))
 
@@ -220,7 +234,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     llm = LLMClient()
     state = run_pipeline(llm, candidate, idea_text=idea_text, run_dir=run_dir,
                          on_step=ProgressPrinter())
-    _finish_run(llm, state, run_dir)
+    _finish_run(llm, candidate, state, run_dir)
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
@@ -237,7 +251,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     state = run_pipeline(llm, candidate, idea_text=saved.original_idea,
                          run_dir=run_dir, resume=True,
                          on_step=ProgressPrinter())
-    _finish_run(llm, state, run_dir)
+    _finish_run(llm, candidate, state, run_dir)
 
 
 def cmd_report(args: argparse.Namespace) -> None:
