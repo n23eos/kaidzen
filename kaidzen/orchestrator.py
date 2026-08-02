@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
+import anthropic
+
 from kaidzen.candidate import Candidate, LoopConfig
 from kaidzen.roles.analyzer import run_analyzer
 from kaidzen.roles.judge import run_judge
@@ -20,9 +22,13 @@ ROLLBACK_LIMIT = 2
 # два подряд слабых прироста = плато
 PLATEAU_STREAK = 2
 
-# статусы, после которых допущение больше не проверяется;
-# partial сюда НЕ входит — его ещё можно доуточнить
+# статусы, после которых допущение больше не проверяется циклом остановки;
+# partial сюда НЕ входит: пока критичное допущение подтверждено лишь частично,
+# «допущения исчерпаны» не наступает и цикл продолжает работать над идеей
 CLOSED_STATUSES = frozenset({"confirmed", "refuted", "untestable"})
+# Researcher получает только допущения в этом статусе: каждое допущение
+# исследуется ровно один раз, а бюджет итераций уходит на ещё не тронутые.
+# partial повторно НЕ исследуется — это и гарантирует остановку цикла.
 OPEN_STATUS = "unverified"
 
 # порядок отбора: сначала самые критичные допущения
@@ -32,11 +38,21 @@ CRITICALITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 2.0
 RETRY_BACKOFF_FACTOR = 2.0
+# Повторяем только то, что реально может пройти со второй попытки: сеть, 429,
+# 5xx — и наши собственные ValueError, которыми роли отвергают бессмысленный
+# ответ модели (повтор = новый промпт, у него есть шанс). Всё остальное
+# (обрезанный ответ, провал схемы, 400) детерминировано и при повторе просто
+# оплачивается втройне, поэтому уходит наверх сразу.
+RETRYABLE_ERRORS = (anthropic.APIConnectionError, anthropic.RateLimitError,
+                    anthropic.InternalServerError, ValueError)
 
 STEP_ANALYZER = "analyzer"
 STEP_RESEARCHER = "researcher"
 STEP_REFINER = "refiner"
 STEP_JUDGE = "judge"
+# префикс «шага», через который оркестратор сообщает наверх о проблеме,
+# не отменяющей прогон: у оркестратора нет вывода, есть только on_step
+STEP_WARNING = "warning"
 # шаги, на которых возобновление входит в середину итерации;
 # остальные значения last_completed_step означают границу итерации
 MID_ITERATION_STEPS = (STEP_RESEARCHER, STEP_REFINER)
@@ -84,11 +100,26 @@ def apply_judge_verdict(state: RunState, judge: JudgeResult,
                         loop: LoopConfig) -> None:
     """Применяет вердикт к последней версии и обновляет счётчики остановки.
 
+    delta_vs_previous, присланная моделью, на управление циклом НЕ влияет:
+    Judge сам себе выставляет оценку и сам же сообщает прирост, а на этом
+    числе висит остановка по плато. Прирост пересчитывается по сохранённому
+    total предыдущей оценённой версии; заявленное значение остаётся в
+    JudgeResult только для отчёта. Версия, набравшая меньше предыдущей, — это
+    деградация независимо от вердикта, поэтому она откатывается.
+
     При откате результат Judge к версии НЕ прикрепляется: версия выброшена,
-    и её оценка не должна попадать в отчёт как оценка идеи.
+    и её оценка не должна попадать в отчёт как оценка идеи. Критика при этом
+    сохраняется в state.last_critique — именно она объясняет следующему
+    Refiner'у, почему прошлая попытка оказалась хуже.
     """
     version = state.versions[-1]
-    if judge.verdict == "rollback":
+    state.last_critique = list(judge.critique)
+    previous_total = _previous_scored_total(state)
+    delta = (judge.total - previous_total if previous_total is not None
+             else judge.delta_vs_previous)
+    is_worse = previous_total is not None and delta < 0
+
+    if judge.verdict == "rollback" or is_worse:
         version.rolled_back = True
         state.rollbacks += 1
         state.consecutive_rollbacks += 1
@@ -96,10 +127,23 @@ def apply_judge_verdict(state: RunState, judge: JudgeResult,
 
     version.judge = judge
     state.consecutive_rollbacks = 0
-    if judge.delta_vs_previous < loop.plateau_threshold:
+    if delta < loop.plateau_threshold:
         state.low_delta_streak += 1
     else:
         state.low_delta_streak = 0
+
+
+def _previous_scored_total(state: RunState) -> float | None:
+    """total последней НЕ откаченной оценённой версии — база для прироста.
+
+    Откаченные версии пропускаются: Refiner переписывал идею не от них,
+    сравнивать новую версию с выброшенной было бы сравнением не с тем текстом.
+    None означает, что сравнивать пока не с чем (первая оценка в прогоне).
+    """
+    for version in reversed(state.versions[:-1]):
+        if not version.rolled_back and version.judge is not None:
+            return version.judge.total
+    return None
 
 
 def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
@@ -115,11 +159,21 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
     on_step, если задан, вызывается после каждого завершённого шага (уже
     сохранённого в state.json) с именем шага и текущим состоянием — это
     единственный способ показать пользователю живой прогресс во время
-    платного многоминутного прогона.
+    платного многоминутного прогона. Тем же колбэком приходят предупреждения:
+    шаг с именем, начинающимся на STEP_WARNING, — это не завершённый шаг, а
+    сообщение о проблеме, которая не отменяет прогон.
+
+    Контракт resume: параметры цикла (max_iterations, plateau_threshold,
+    assumptions_per_iteration) берутся ИЗ СНАПШОТА state.config (ТЗ §5), а не
+    из переданного кандидата. Кандидат при возобновлении нужен только ради
+    промптов и имён моделей. Иначе прогон, запущенный с --max-iter 2, при
+    продолжении получил бы лимит из config.yaml кандидата и потратил чужой
+    бюджет; вызывающему коду достаточно загрузить кандидата по
+    state.candidate_id, ничего не подмешивая в его конфиг.
     """
     state = load_state(run_dir) if resume else _new_state(candidate, idea_text,
                                                           run_dir)
-    loop = candidate.config.loop
+    loop = _loop_from_state(state) if resume else candidate.config.loop
     if state.analysis is None:
         _step_analyzer(llm, candidate, state, run_dir, on_step)
 
@@ -137,6 +191,20 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
             _step_refiner(llm, candidate, state, run_dir, on_step)
         _step_judge(llm, candidate, state, run_dir, loop, on_step)
         entry = None
+
+
+def _loop_from_state(state: RunState) -> LoopConfig:
+    """Параметры цикла из снапшота конфига прогона.
+
+    Отсутствие секции loop — это битый или чужой state.json: тихо подставить
+    дефолты значило бы продолжить прогон с неизвестным пользователю бюджетом.
+    """
+    loop_data = state.config.get("loop")
+    if loop_data is None:
+        raise ValueError(
+            "в state.config нет секции loop — продолжить прогон нельзя: "
+            "неизвестно, с какими параметрами цикла он был запущен")
+    return LoopConfig.model_validate(loop_data)
 
 
 def _new_state(candidate: Candidate, idea_text: str, run_dir: Path) -> RunState:
@@ -167,42 +235,99 @@ def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
                                   loop.assumptions_per_iteration)
     if not selected:
         return False
-    out = _with_retry(lambda: run_researcher(
-        llm, candidate, idea_text=state.current_idea_text(),
-        assumptions=selected))
-    _apply_findings(state, out)
+    out, unknown_ids = _with_retry(
+        lambda: _research_and_apply(llm, candidate, state, selected))
     # находки нужны Refiner'у целиком; в реестр попадают только статус и факты,
     # поэтому сырой JSON кладём в состояние — иначе возобновление их потеряет
     state.pending_findings = out.model_dump_json()
     _checkpoint(state, run_dir, llm, STEP_RESEARCHER, on_step)
+    if unknown_ids:
+        _notify(on_step,
+                f"{STEP_WARNING}: Researcher вернул находки по неизвестным "
+                f"допущениям (отброшены): {', '.join(unknown_ids)}", state)
     return True
 
 
-def _apply_findings(state: RunState, researcher_output) -> None:
-    """Переносит вердикты и факты в реестр допущений."""
+def _research_and_apply(llm, candidate: Candidate, state: RunState,
+                        selected: list[Assumption]):
+    """Один вызов Researcher вместе с разбором ответа — целиком под ретраем."""
+    out = run_researcher(llm, candidate, idea_text=state.current_idea_text(),
+                         assumptions=selected)
+    return out, _apply_findings(state, out)
+
+
+def _apply_findings(state: RunState, researcher_output) -> list[str]:
+    """Переносит вердикты и факты в реестр. Возвращает id, которых там нет.
+
+    Если в реестр не легла НИ ОДНА находка, вызов бесполезен целиком: допущения
+    остаются unverified, следующая итерация исследует их заново, и так до конца
+    бюджета — прогон стоит денег и не проверяет ничего. Поэтому здесь ValueError:
+    шаг уйдёт на повтор, и модель получит промпт заново.
+    """
     by_id = {a.id: a for a in state.assumptions}
-    for finding in researcher_output.findings:
+    findings = researcher_output.findings
+    unknown_ids = [f.assumption_id for f in findings if f.assumption_id not in by_id]
+    if findings and len(unknown_ids) == len(findings):
+        raise ValueError(
+            "Researcher не вернул ни одной находки по существующим допущениям; "
+            f"неизвестные id: {', '.join(unknown_ids)}")
+
+    # реестр меняем только после проверки: неудачная попытка не должна
+    # оставлять после себя половину применённых находок
+    for finding in findings:
         assumption = by_id.get(finding.assumption_id)
         if assumption is None:
-            continue  # модель придумала id — молча игнорируем
+            continue
         assumption.status = finding.verdict
         assumption.facts = assumption.facts + list(finding.facts)
+    return unknown_ids
 
 
 def _step_refiner(llm, candidate: Candidate, state: RunState,
                   run_dir: Path,
                   on_step: Callable[[str, RunState], None] | None = None
                   ) -> None:
-    """Переписывает идею по находкам и критике прошлого Judge."""
-    current = state.current_version()
-    critique = current.judge.critique if current and current.judge else []
-    out = _with_retry(lambda: run_refiner(
-        llm, candidate, idea_text=state.current_idea_text(),
-        findings_json=state.pending_findings or "", critique=critique))
+    """Переписывает идею по находкам и критике прошлого Judge.
+
+    Критика берётся из state.last_critique, а не из текущей версии: после
+    отката текущая версия — это позапрошлый текст с позапрошлой критикой, и
+    Refiner повторил бы ровно то изменение, из-за которого случился откат.
+    """
+    out = _with_retry(lambda: _refine_and_check(llm, candidate, state))
     state.versions.append(Version(n=len(state.versions) + 1,
                                   idea_text=out.idea_text,
                                   changelog=out.changelog))
     _checkpoint(state, run_dir, llm, STEP_REFINER, on_step)
+
+
+def _refine_and_check(llm, candidate: Candidate, state: RunState):
+    """Один вызов Refiner вместе с проверкой обоснованности — под ретраем."""
+    out = run_refiner(llm, candidate, idea_text=state.current_idea_text(),
+                      findings_json=state.pending_findings or "",
+                      critique=state.last_critique)
+    _check_grounding(state, out)
+    return out
+
+
+def _check_grounding(state: RunState, refiner_output) -> None:
+    """Изменения идеи должны опираться на проверенные допущения.
+
+    Вся система строится на том, что итерация закрывает допущения фактами, а
+    не полирует текст. Пустой changelog при полученных находках и ссылка на
+    несуществующее допущение — это ровно «переписал как захотелось»: такой
+    ответ не принимаем, шаг уходит на повтор.
+    """
+    if state.pending_findings and not refiner_output.changelog:
+        raise ValueError(
+            "Refiner вернул пустой changelog, хотя получил находки Researcher: "
+            "изменения идеи не обоснованы")
+    known = {a.id for a in state.assumptions}
+    unknown = [gid for entry in refiner_output.changelog
+               for gid in entry.grounded_in if gid not in known]
+    if unknown:
+        raise ValueError(
+            "changelog ссылается на несуществующие допущения: "
+            f"{', '.join(unknown)}")
 
 
 def _step_judge(llm, candidate: Candidate, state: RunState, run_dir: Path,
@@ -234,16 +359,18 @@ def _idea_before_last_version(state: RunState) -> str:
 
 
 def _with_retry(call: Callable[[], T]) -> T:
-    """Три попытки с экспоненциальной паузой: сеть и 5xx лечатся повтором.
+    """Три попытки с экспоненциальной паузой для ошибок из RETRYABLE_ERRORS.
 
-    Если не помогло — исключение уходит наверх, состояние на диске при этом
-    уже отражает последний завершённый шаг.
+    Остальное уходит наверх с первого раза: повтор детерминированной ошибки
+    (обрезанный ответ, провал схемы, 400) не может закончиться иначе, зато
+    стоит втрое. Состояние на диске при этом уже отражает последний
+    завершённый шаг, так что прогон продолжается через resume.
     """
     delay = RETRY_BASE_DELAY_SECONDS
     for attempt in range(RETRY_ATTEMPTS):
         try:
             return call()
-        except Exception:
+        except RETRYABLE_ERRORS:
             if attempt == RETRY_ATTEMPTS - 1:
                 raise
             time.sleep(delay)
@@ -256,6 +383,11 @@ def _checkpoint(state: RunState, run_dir: Path, llm, step: str,
                 ) -> None:
     state.last_completed_step = step
     _save(state, run_dir, llm)
+    _notify(on_step, step, state)
+
+
+def _notify(on_step: Callable[[str, RunState], None] | None, step: str,
+            state: RunState) -> None:
     if on_step is None:
         return
     try:
