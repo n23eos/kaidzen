@@ -1,3 +1,4 @@
+import os
 import pytest
 from pathlib import Path
 from pydantic import ValidationError
@@ -21,10 +22,51 @@ def test_fact_requires_source_url():
         Fact(claim="x", source_title="t")
 
 
+@pytest.mark.parametrize("bad_url", ["", "   ", "из общих знаний", "example.com",
+                                     "ftp://example.com/x"])
+def test_fact_rejects_non_http_source(bad_url):
+    with pytest.raises(ValidationError):
+        Fact(claim="x", source_url=bad_url)
+
+
+@pytest.mark.parametrize("url", ["http://example.com/a", "https://example.com/b"])
+def test_fact_accepts_http_source_and_keeps_plain_str(url):
+    f = Fact(claim="x", source_url=url)
+    assert f.source_url == url
+    assert isinstance(f.source_url, str)
+    assert Fact.model_validate_json(f.model_dump_json()) == f
+
+
 def test_judge_verdict_enum():
     with pytest.raises(ValidationError):
         JudgeResult(scores={"clarity": 5}, total=5.0,
                     delta_vs_previous=0.0, critique=[], verdict="maybe")
+
+
+@pytest.mark.parametrize("score", [-0.5, 10.5, 85.0])
+def test_judge_rejects_score_outside_0_10(score):
+    with pytest.raises(ValidationError):
+        JudgeResult(scores={"clarity": score}, total=score,
+                    delta_vs_previous=0.0, critique=[], verdict="continue")
+
+
+def test_judge_rejects_total_not_matching_scores():
+    with pytest.raises(ValidationError, match="total"):
+        JudgeResult(scores={"a": 5.0, "b": 4.0}, total=42.0,
+                    delta_vs_previous=0.0, critique=[], verdict="continue")
+
+
+def test_judge_accepts_total_within_tolerance():
+    jr = JudgeResult(scores={"a": 5.0, "b": 4.0}, total=9.005,
+                     delta_vs_previous=0.0, critique=[], verdict="continue")
+    assert jr.total == 9.005
+
+
+def test_judge_allows_any_number_of_axes():
+    """Количество осей проверяет валидация кандидата, не JudgeResult."""
+    jr = JudgeResult(scores={"a": 1.0}, total=1.0, delta_vs_previous=0.0,
+                     critique=[], verdict="continue")
+    assert jr.scores == {"a": 1.0}
 
 
 def test_runstate_roundtrip():
@@ -66,6 +108,54 @@ def test_save_creates_missing_dir(tmp_path: Path):
     target = tmp_path / "nested" / "run1"
     save_state(s, target)
     assert (target / "state.json").exists()
+
+
+def test_save_fsyncs_data_and_directory(tmp_path: Path, monkeypatch):
+    """Без fsync rename может лечь раньше данных — state.json окажется обрезан."""
+    synced: list[int] = []
+    monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd))
+    dir_fds: list[int] = []
+    real_open = os.open
+
+    def spy_open(path, flags, *a, **kw):
+        fd = real_open(path, flags, *a, **kw)
+        if flags & os.O_DIRECTORY:
+            dir_fds.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", spy_open)
+    save_state(RunState(run_id="r1", candidate_id="c", config={},
+                        original_idea="i"), tmp_path)
+    assert len(synced) >= 2          # файл + каталог
+    assert dir_fds and dir_fds[0] in synced
+
+
+def test_save_removes_temp_file_when_serialization_fails(tmp_path: Path, monkeypatch):
+    s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i")
+    monkeypatch.setattr(type(s), "model_dump_json",
+                        lambda self, **kw: (_ for _ in ()).throw(RuntimeError("бум")))
+    with pytest.raises(RuntimeError):
+        save_state(s, tmp_path)
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_save_uses_unique_temp_names(tmp_path: Path, monkeypatch):
+    """Фиксированное имя state.json.tmp — гонка между двумя записями."""
+    seen: list[str] = []
+    import tempfile
+    real_mkstemp = tempfile.mkstemp
+
+    def spy(*a, **kw):
+        fd, path = real_mkstemp(*a, **kw)
+        seen.append(path)
+        return fd, path
+
+    monkeypatch.setattr(tempfile, "mkstemp", spy)
+    s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i")
+    save_state(s, tmp_path)
+    save_state(s, tmp_path)
+    assert len(seen) == 2 and seen[0] != seen[1]
 
 
 def test_load_missing_raises(tmp_path: Path):
