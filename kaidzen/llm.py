@@ -15,9 +15,15 @@ MAX_SCHEMA_RETRIES = 1      # один повтор с текстом ошибк
 # pause_turn — это не ошибка: сервер приостановил долгий ход (веб-поиск).
 # Продолжаем ход, но ограничиваем число продолжений, чтобы не крутиться вечно.
 MAX_PAUSE_CONTINUATIONS = 4
-WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
-DEFAULT_MAX_TOKENS = 4096
+# версия с динамической фильтрацией: результаты поиска отсеиваются ДО того,
+# как попадут в контекст — критично для Researcher с восемью поисками за вызов
+WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+# adaptive thinking на claude-sonnet-5 включено по умолчанию, а max_tokens —
+# общий потолок на размышление И на текст ответа, поэтому нужен запас
+DEFAULT_MAX_TOKENS = 16000
 DEFAULT_MAX_SEARCHES = 8
+# выше этого потолка SDK требует стриминга, иначе рвёт HTTP по таймауту
+STREAMING_MAX_TOKENS = 16000
 
 
 class SchemaValidationFailure(Exception):
@@ -39,11 +45,16 @@ class LLMClient:
         self.usage = ApiUsage()
 
     def structured(self, *, model: str, system: str, user: str,
-                   schema: Type[T], temperature: float,
+                   schema: Type[T], effort: str,
                    web_search: bool = False,
                    max_searches: int = DEFAULT_MAX_SEARCHES,
                    max_tokens: int = DEFAULT_MAX_TOKENS) -> T:
-        """Вызывает модель и возвращает валидированный объект схемы."""
+        """Вызывает модель и возвращает валидированный объект схемы.
+
+        effort — глубина работы модели ("low"|"medium"|"high"|"xhigh"|"max").
+        На claude-sonnet-5 temperature/top_p/top_k убраны: любое их значение
+        возвращает 400, глубина задаётся только через output_config.
+        """
         tools: list[dict] = [self._submit_tool(schema)]
         extra: dict = {}
         if web_search:
@@ -58,9 +69,9 @@ class LLMClient:
         schema_failures = 0
         pause_continuations = 0
         while True:
-            response = self._client.messages.create(
+            response = self._send(
                 model=model, system=system, messages=messages,
-                temperature=temperature, max_tokens=max_tokens,
+                output_config={"effort": effort}, max_tokens=max_tokens,
                 tools=tools, **extra)
             self._record_usage(response)
             stop_reason = getattr(response, "stop_reason", None)
@@ -107,6 +118,17 @@ class LLMClient:
             # сохраняем ход ассистента целиком: там же лежат результаты
             # веб-поиска, которые иначе пришлось бы искать заново
             messages = messages + [self._assistant_turn(response), feedback]
+
+    def _send(self, **kwargs):
+        """Один запрос к API: большой бюджет токенов требует стриминга.
+
+        Без стрима долгий ответ упирается в HTTP-таймаут SDK и падает,
+        поэтому от порога STREAMING_MAX_TOKENS переключаемся на stream().
+        """
+        if kwargs["max_tokens"] < STREAMING_MAX_TOKENS:
+            return self._client.messages.create(**kwargs)
+        with self._client.messages.stream(**kwargs) as stream:
+            return stream.get_final_message()
 
     @staticmethod
     def _assistant_turn(response) -> dict:
