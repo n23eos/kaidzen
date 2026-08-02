@@ -107,6 +107,11 @@ class RunState(BaseModel):
     low_delta_streak: int = 0
     stop_reason: Optional[str] = None
     last_completed_step: Optional[str] = None
+    # сырой JSON находок Researcher текущей итерации: их ждёт Refiner.
+    # В реестр допущений находки уже применены, но там теряются notes и
+    # привязка «что нашли именно сейчас», поэтому без этого поля
+    # возобновление после шага researcher было бы с потерей данных.
+    pending_findings: Optional[str] = None
     api_usage: ApiUsage = Field(default_factory=ApiUsage)
 
     def current_version(self) -> Optional[Version]:

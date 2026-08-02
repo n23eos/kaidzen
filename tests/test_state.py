@@ -74,6 +74,15 @@ def test_runstate_roundtrip():
                  config={}, original_idea="idea")
     s2 = RunState.model_validate_json(s.model_dump_json())
     assert s2.iteration == 0 and s2.versions == []
+    assert s2.pending_findings is None
+
+
+def test_runstate_keeps_pending_findings_across_save(tmp_path: Path):
+    # находки Researcher должны переживать перезапуск: их ждёт Refiner
+    s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i",
+                 pending_findings='{"findings": []}')
+    save_state(s, tmp_path)
+    assert load_state(tmp_path).pending_findings == '{"findings": []}'
 
 
 def test_current_version_skips_rolled_back():
