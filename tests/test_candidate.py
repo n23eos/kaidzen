@@ -76,6 +76,63 @@ def test_missing_config_raises(tmp_path):
         load_candidate(d)
 
 
+def test_unknown_top_level_key_rejected(tmp_path):
+    """Опечатка в ключе не должна молча включать дефолты."""
+    bad = VALID_CONFIG.replace("loop:", "lop:")
+    with pytest.raises(ValueError, match="lop"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_unknown_loop_key_rejected(tmp_path):
+    bad = VALID_CONFIG.replace("  max_iterations: 6", "  max_iteration: 6")
+    with pytest.raises(ValueError, match="max_iteration"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+@pytest.mark.parametrize("line,broken", [
+    ("  max_iterations: 6", "  max_iterations: 0"),
+    ("  max_iterations: 6", "  max_iterations: 21"),
+    ("  plateau_threshold: 0.5", "  plateau_threshold: -3"),
+    ("  plateau_threshold: 0.5", "  plateau_threshold: 11"),
+    ("  assumptions_per_iteration: 3", "  assumptions_per_iteration: 0"),
+    ("  assumptions_per_iteration: 3", "  assumptions_per_iteration: 11"),
+])
+def test_loop_params_are_bounded(tmp_path, line, broken):
+    with pytest.raises(ValueError):
+        load_candidate(make_candidate(tmp_path, VALID_CONFIG.replace(line, broken)))
+
+
+def test_empty_prompt_file_rejected(tmp_path):
+    d = make_candidate(tmp_path)
+    (d / "prompts" / "judge.md").write_text("   \n\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="judge"):
+        load_candidate(d)
+
+
+def test_blank_model_name_rejected(tmp_path):
+    bad = VALID_CONFIG.replace("  judge: claude-sonnet-5", '  judge: ""')
+    with pytest.raises(ValueError, match="judge"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_blank_domain_rejected(tmp_path):
+    bad = VALID_CONFIG.replace('domain: "тест"', 'domain: "  "')
+    with pytest.raises(ValueError, match="domain"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_blank_rubric_axis_description_rejected(tmp_path):
+    bad = VALID_CONFIG.replace('  clarity: "ясность"', '  clarity: ""')
+    with pytest.raises(ValueError, match="clarity"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+@pytest.mark.parametrize("text", ["", "- a\n- b\n", "просто строка\n"])
+def test_non_mapping_config_rejected(tmp_path, text):
+    with pytest.raises(ValueError, match="config.yaml"):
+        load_candidate(make_candidate(tmp_path, text))
+
+
 def test_loop_defaults_when_section_absent(tmp_path):
     bare = VALID_CONFIG.split("loop:")[0] + """models:
   analyzer: m
