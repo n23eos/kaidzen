@@ -1,11 +1,21 @@
+from typing import Optional
+
 import pytest
 from pydantic import BaseModel
-from kaidzen.llm import LLMClient, SchemaValidationFailure
+from kaidzen.llm import (LLMClient, PauseTurnLimitExceeded, ResponseTruncated,
+                         SchemaValidationFailure, MAX_PAUSE_CONTINUATIONS)
+from kaidzen.state import Fact
 
 
 class Out(BaseModel):
     answer: str
     score: int
+
+
+class NestedOut(BaseModel):
+    """Схема с вложенной моделью и Optional — как реальные схемы ролей."""
+    facts: list[Fact]
+    note: Optional[str] = None
 
 
 class FakeBlock:
@@ -25,9 +35,11 @@ class FakeUsage:
 
 
 class FakeResponse:
-    def __init__(self, blocks, in_tok=10, out_tok=5, searches=None):
+    def __init__(self, blocks, in_tok=10, out_tok=5, searches=None,
+                 stop_reason="tool_use"):
         self.content = blocks
         self.usage = FakeUsage(in_tok, out_tok, searches)
+        self.stop_reason = stop_reason
 
 
 class FakeMessages:
@@ -47,18 +59,24 @@ def make_client(responses):
     return client, fake
 
 
-def good():
-    return FakeResponse([FakeBlock("tool_use", name="submit",
+def good(block_id="tu_ok"):
+    return FakeResponse([FakeBlock("tool_use", id=block_id, name="submit",
                                    input={"answer": "ok", "score": 7})])
 
 
-def missing_field():
-    return FakeResponse([FakeBlock("tool_use", name="submit",
+def missing_field(block_id="tu_bad"):
+    return FakeResponse([FakeBlock("tool_use", id=block_id, name="submit",
                                    input={"answer": "ok"})])
 
 
 def no_tool_call():
-    return FakeResponse([FakeBlock("text", text="я просто поболтаю")])
+    return FakeResponse([FakeBlock("text", text="я просто поболтаю")],
+                        stop_reason="end_turn")
+
+
+def paused(text="ищу..."):
+    """Ответ сервера с приостановленным ходом: submit ещё не вызван."""
+    return FakeResponse([FakeBlock("text", text=text)], stop_reason="pause_turn")
 
 
 def test_structured_returns_validated_model():
@@ -85,21 +103,92 @@ def test_web_search_adds_tool_and_drops_tool_choice():
     assert "submit" in names and "web_search" in names
 
 
-def test_retry_once_on_schema_error_then_success():
-    client, fake = make_client([missing_field(), good()])
+def test_retry_keeps_conversation_protocol_valid():
+    """Провал валидации: сохраняем ход ассистента и отвечаем tool_result'ом."""
+    failed = missing_field(block_id="tu_1")
+    client, fake = make_client([failed, good()])
     out = client.structured(model="m", system="s", user="u",
                             schema=Out, temperature=0.1)
     assert out.score == 7
     assert len(fake.calls) == 2
-    assert "score" in str(fake.calls[1]["messages"])
+
+    messages = fake.calls[1]["messages"]
+    assert len(messages) == 3
+    # исходный вопрос пользователя не потерян
+    assert messages[0] == {"role": "user", "content": "u"}
+    # ход ассистента со всеми блоками (включая результаты веб-поиска) сохранён
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["content"] is failed.content
+    # на tool_use обязан быть ровно один tool_result с тем же id
+    assert messages[2]["role"] == "user"
+    result = messages[2]["content"][0]
+    assert result["type"] == "tool_result"
+    assert result["tool_use_id"] == "tu_1"
+    assert result["is_error"] is True
+    assert "score" in result["content"]
 
 
 def test_retry_when_model_never_calls_submit():
-    client, fake = make_client([no_tool_call(), good()])
+    """Нет tool_use — отвечать нечем, шлём обычное текстовое напоминание."""
+    silent = no_tool_call()
+    client, fake = make_client([silent, good()])
     out = client.structured(model="m", system="s", user="u",
                             schema=Out, temperature=0)
     assert out.score == 7
     assert len(fake.calls) == 2
+
+    messages = fake.calls[1]["messages"]
+    assert messages[0] == {"role": "user", "content": "u"}
+    assert messages[1] == {"role": "assistant", "content": silent.content}
+    assert messages[2]["role"] == "user"
+    assert isinstance(messages[2]["content"], str)
+    assert "submit" in messages[2]["content"]
+
+
+def test_pause_turn_continues_without_spending_schema_retry():
+    """pause_turn — не ошибка схемы: продолжаем ход и сохраняем бюджет retry."""
+    pause = paused()
+    client, fake = make_client([pause, missing_field(), good()])
+    out = client.structured(model="m", system="s", user="u", schema=Out,
+                            temperature=0, web_search=True)
+    assert out.score == 7
+    assert len(fake.calls) == 3
+    # после паузы дописан ход ассистента, никакого текста про валидацию
+    assert fake.calls[1]["messages"] == [{"role": "user", "content": "u"},
+                                         {"role": "assistant", "content": pause.content}]
+
+
+def test_pause_turn_bounded_by_max_continuations():
+    responses = [paused() for _ in range(MAX_PAUSE_CONTINUATIONS + 1)]
+    client, fake = make_client(responses)
+    with pytest.raises(PauseTurnLimitExceeded):
+        client.structured(model="m", system="s", user="u", schema=Out,
+                          temperature=0, web_search=True)
+    assert len(fake.calls) == MAX_PAUSE_CONTINUATIONS + 1
+
+
+def test_max_tokens_raises_distinct_error():
+    truncated = FakeResponse([FakeBlock("text", text="дли")], stop_reason="max_tokens")
+    client, fake = make_client([truncated, good()])
+    with pytest.raises(ResponseTruncated):
+        client.structured(model="m", system="s", user="u", schema=Out, temperature=0)
+    assert len(fake.calls) == 1  # обрезка — не повод повторять
+
+
+def test_nested_schema_input_schema_has_defs_and_refs():
+    """Реальные схемы ролей вложенные: $defs/$ref должны уходить как есть."""
+    client, fake = make_client([FakeResponse([FakeBlock(
+        "tool_use", id="tu_n", name="submit",
+        input={"facts": [{"claim": "c", "source_url": "https://x.test"}]})])])
+    out = client.structured(model="m", system="s", user="u",
+                            schema=NestedOut, temperature=0)
+    assert out.facts[0].source_url == "https://x.test"
+
+    sent = fake.calls[0]["tools"][0]["input_schema"]
+    assert sent == NestedOut.model_json_schema()
+    assert "Fact" in sent["$defs"]
+    assert sent["properties"]["facts"]["items"]["$ref"] == "#/$defs/Fact"
+    assert "note" in sent["properties"]
 
 
 def test_two_schema_failures_raise():
@@ -111,12 +200,18 @@ def test_two_schema_failures_raise():
 
 
 def test_usage_accumulates_across_calls():
-    client, _ = make_client([good(), good()])
+    client, _ = make_client([
+        FakeResponse([FakeBlock("tool_use", id="t1", name="submit",
+                                input={"answer": "ok", "score": 7})],
+                     in_tok=10, out_tok=5, searches=2),
+        FakeResponse([FakeBlock("tool_use", id="t2", name="submit",
+                                input={"answer": "ok", "score": 7})],
+                     in_tok=30, out_tok=7, searches=1)])
     client.structured(model="m", system="s", user="u", schema=Out, temperature=0)
     client.structured(model="m", system="s", user="u", schema=Out, temperature=0)
-    assert client.usage.input_tokens == 20
-    assert client.usage.output_tokens == 10
-    assert client.usage.web_searches == 0
+    assert client.usage.input_tokens == 40
+    assert client.usage.output_tokens == 12
+    assert client.usage.web_searches == 3
 
 
 def test_usage_counts_web_searches():

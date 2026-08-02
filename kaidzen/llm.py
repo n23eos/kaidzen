@@ -12,6 +12,9 @@ T = TypeVar("T", bound=BaseModel)
 
 SUBMIT_TOOL = "submit"
 MAX_SCHEMA_RETRIES = 1      # один повтор с текстом ошибки валидации
+# pause_turn — это не ошибка: сервер приостановил долгий ход (веб-поиск).
+# Продолжаем ход, но ограничиваем число продолжений, чтобы не крутиться вечно.
+MAX_PAUSE_CONTINUATIONS = 4
 WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_MAX_SEARCHES = 8
@@ -19,6 +22,14 @@ DEFAULT_MAX_SEARCHES = 8
 
 class SchemaValidationFailure(Exception):
     """Модель дважды не смогла вернуть ответ по схеме."""
+
+
+class ResponseTruncated(Exception):
+    """Ответ обрезан по max_tokens — это не проблема схемы, повтор не поможет."""
+
+
+class PauseTurnLimitExceeded(Exception):
+    """Слишком много продолжений приостановленного хода."""
 
 
 class LLMClient:
@@ -43,38 +54,74 @@ class LLMClient:
         else:
             extra["tool_choice"] = {"type": "tool", "name": SUBMIT_TOOL}
 
-        messages = [{"role": "user", "content": user}]
-        last_error = ""
-        for _ in range(MAX_SCHEMA_RETRIES + 1):
-            if last_error:
-                messages = messages + [{
-                    "role": "user",
-                    "content": (f"Твой прошлый ответ не прошёл валидацию: {last_error}. "
-                                f"Вызови tool '{SUBMIT_TOOL}' ещё раз с исправленными полями.")}]
+        messages: list[dict] = [{"role": "user", "content": user}]
+        schema_failures = 0
+        pause_continuations = 0
+        while True:
             response = self._client.messages.create(
                 model=model, system=system, messages=messages,
                 temperature=temperature, max_tokens=max_tokens,
                 tools=tools, **extra)
             self._record_usage(response)
-            payload = self._extract_submit(response)
-            if payload is None:
-                last_error = f"ответ не содержит вызова tool '{SUBMIT_TOOL}'"
+            stop_reason = getattr(response, "stop_reason", None)
+
+            if stop_reason == "max_tokens":
+                raise ResponseTruncated(
+                    f"ответ обрезан по max_tokens={max_tokens}")
+
+            if stop_reason == "pause_turn":
+                # долгий серверный tool-use: продолжаем тот же ход,
+                # бюджет retry по схеме при этом не тратится
+                pause_continuations += 1
+                if pause_continuations > MAX_PAUSE_CONTINUATIONS:
+                    raise PauseTurnLimitExceeded(
+                        f"превышен лимит продолжений хода: {MAX_PAUSE_CONTINUATIONS}")
+                messages = messages + [self._assistant_turn(response)]
                 continue
-            try:
-                return schema.model_validate(payload)
-            except ValidationError as e:
-                last_error = str(e)
-        raise SchemaValidationFailure(last_error)
+
+            block = self._extract_submit(response)
+            if block is None:
+                last_error = f"ответ не содержит вызова tool '{SUBMIT_TOOL}'"
+                # отвечать нечем: tool_use не было, шлём обычное напоминание
+                feedback = {
+                    "role": "user",
+                    "content": (f"Ты не вызвал tool '{SUBMIT_TOOL}'. "
+                                f"Вызови его и передай ответ по схеме.")}
+            else:
+                try:
+                    return schema.model_validate(block.input)
+                except ValidationError as e:
+                    last_error = str(e)
+                    # на каждый tool_use обязан быть tool_result с тем же id,
+                    # иначе диалог невалиден для Messages API
+                    feedback = {"role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "is_error": True,
+                        "content": (f"Ответ не прошёл валидацию: {last_error}. "
+                                    f"Вызови '{SUBMIT_TOOL}' ещё раз с исправленными полями.")}]}
+
+            schema_failures += 1
+            if schema_failures > MAX_SCHEMA_RETRIES:
+                raise SchemaValidationFailure(last_error)
+            # сохраняем ход ассистента целиком: там же лежат результаты
+            # веб-поиска, которые иначе пришлось бы искать заново
+            messages = messages + [self._assistant_turn(response), feedback]
+
+    @staticmethod
+    def _assistant_turn(response) -> dict:
+        return {"role": "assistant", "content": response.content}
 
     def _submit_tool(self, schema: Type[BaseModel]) -> dict:
         return {"name": SUBMIT_TOOL,
                 "description": "Отправить финальный структурированный ответ.",
                 "input_schema": schema.model_json_schema()}
 
-    def _extract_submit(self, response) -> dict | None:
+    def _extract_submit(self, response):
+        """Возвращает сам блок tool_use: нужен и payload, и его id для tool_result."""
         for block in response.content:
             if block.type == "tool_use" and block.name == SUBMIT_TOOL:
-                return block.input
+                return block
         return None
 
     def _record_usage(self, response) -> None:
