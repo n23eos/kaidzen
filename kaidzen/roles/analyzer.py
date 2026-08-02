@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from kaidzen.candidate import Candidate
 from kaidzen.state import Assumption
 
-TEMPERATURE = 0.3
+EFFORT = "medium"
 
 
 class AnalyzerOutput(BaseModel):
@@ -23,4 +23,4 @@ def run_analyzer(llm, candidate: Candidate, *, idea_text: str) -> AnalyzerOutput
             f"Подсказки: {candidate.config.analyzer_hints}")
     return llm.structured(model=candidate.config.models["analyzer"],
                           system=candidate.prompts["analyzer"], user=user,
-                          schema=AnalyzerOutput, temperature=TEMPERATURE)
+                          schema=AnalyzerOutput, effort=EFFORT)

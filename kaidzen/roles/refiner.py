@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 from kaidzen.candidate import Candidate
 from kaidzen.state import ChangelogEntry
 
-TEMPERATURE = 0.7
+EFFORT = "high"
+# Refiner пишет самый длинный ответ цикла: полный текст идеи плюс changelog.
+# Бюджет общий с размышлением, поэтому запас больше, чем у остальных ролей.
+MAX_TOKENS = 32000
 NO_CRITIQUE = "(первая итерация, критики нет)"
 
 
@@ -23,4 +26,5 @@ def run_refiner(llm, candidate: Candidate, *, idea_text: str,
             f"Критика Judge с прошлой итерации:\n{crit}")
     return llm.structured(model=candidate.config.models["refiner"],
                           system=candidate.prompts["refiner"], user=user,
-                          schema=RefinerOutput, temperature=TEMPERATURE)
+                          schema=RefinerOutput, effort=EFFORT,
+                          max_tokens=MAX_TOKENS)
