@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from kaidzen import __main__ as cli
-from kaidzen.state import ApiUsage, JudgeResult, RunState, Version, load_state
+from kaidzen.state import (ApiUsage, Assumption, JudgeResult, RunState, Version,
+                           load_state)
 
 
 class ExplodingLLM:
@@ -251,23 +252,70 @@ def make_judge(total: float, delta: float) -> JudgeResult:
                        delta_vs_previous=delta, critique=[], verdict="continue")
 
 
-def test_print_iterations_shows_score_rollback_and_missing_judge(capsys):
-    # Arrange
+def test_progress_printer_analyzer_reports_count_and_high_criticality(capsys):
     state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
-                     versions=[
-                         Version(n=1, idea_text="a", judge=make_judge(7.0, 2.0)),
-                         Version(n=2, idea_text="b", rolled_back=True),
-                         Version(n=3, idea_text="c"),
+                     assumptions=[
+                         Assumption(id="A1", text="x", criticality="high"),
+                         Assumption(id="A2", text="y", criticality="low"),
                      ])
 
-    # Act
-    cli._print_iterations(state)
+    cli.ProgressPrinter()(cli.STEP_ANALYZER, state)
+
+    out = capsys.readouterr().out
+    assert "допущений найдено: 2" in out
+    assert "критичных: 1" in out
+
+
+def test_progress_printer_researcher_names_only_changed_ids(capsys):
+    # Arrange: принтер видел допущения через analyzer, все unverified
+    printer = cli.ProgressPrinter()
+    state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
+                     assumptions=[
+                         Assumption(id="A1", text="x", criticality="high"),
+                         Assumption(id="A2", text="y", criticality="low"),
+                     ])
+    printer(cli.STEP_ANALYZER, state)
+    capsys.readouterr()  # сбрасываем вывод шага analyzer
+
+    # Act: только A1 сменил статус, A2 остался unverified
+    state.assumptions[0].status = "confirmed"
+    printer(cli.STEP_RESEARCHER, state)
 
     # Assert
     out = capsys.readouterr().out
-    assert "итерация 1: оценка 7.0 (дельта +2.0)" in out
-    assert "итерация 2: версия откачена судьёй" in out
-    assert "итерация 3: без оценки" in out
+    assert "A1=confirmed" in out
+    assert "A2" not in out
+
+
+def test_progress_printer_refiner_reports_new_version_number(capsys):
+    state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
+                     versions=[Version(n=1, idea_text="v1")])
+
+    cli.ProgressPrinter()(cli.STEP_REFINER, state)
+
+    assert "v1" in capsys.readouterr().out
+
+
+def test_progress_printer_judge_reports_iteration_score_and_delta(capsys):
+    state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
+                     iteration=1,
+                     versions=[Version(n=1, idea_text="v1",
+                                       judge=make_judge(7.0, 2.0))])
+
+    cli.ProgressPrinter()(cli.STEP_JUDGE, state)
+
+    out = capsys.readouterr().out
+    assert "итерация 1" in out and "7.0" in out and "+2.0" in out
+
+
+def test_progress_printer_judge_reports_rollback(capsys):
+    state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
+                     iteration=1,
+                     versions=[Version(n=1, idea_text="v1", rolled_back=True)])
+
+    cli.ProgressPrinter()(cli.STEP_JUDGE, state)
+
+    assert "откачена" in capsys.readouterr().out
 
 
 def test_finish_run_writes_report_with_summary_and_prints_usage(tmp_path, capsys):

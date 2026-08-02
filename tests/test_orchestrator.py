@@ -428,3 +428,65 @@ def test_pipeline_resumes_after_analyzer_step(candidate, tmp_path):
 
     assert len(resumed_llm.calls) == 3
     assert state.iteration == 1
+
+
+# --- on_step callback --------------------------------------------------------
+
+def test_pipeline_without_callback_behaves_as_before(candidate, tmp_path):
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   research_out(("A1", "confirmed")),
+                   refiner_out("версия 1"),
+                   make_judge(delta=2.0)])
+
+    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+                         run_dir=tmp_path / "run-1", resume=False)
+
+    assert state.stop_reason == "assumptions_exhausted"
+
+
+def test_pipeline_calls_on_step_once_per_step_in_order(candidate, tmp_path):
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   research_out(("A1", "confirmed")),
+                   refiner_out("версия 1"),
+                   make_judge(delta=2.0)])
+    calls: list[str] = []
+
+    run_pipeline(llm, candidate, idea_text="сырая идея",
+                run_dir=tmp_path / "run-1", resume=False,
+                on_step=lambda step, state: calls.append(step))
+
+    assert calls == ["analyzer", "researcher", "refiner", "judge"]
+
+
+def test_pipeline_on_step_sees_state_already_reflecting_the_step(candidate,
+                                                                  tmp_path):
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   research_out(("A1", "confirmed")),
+                   refiner_out("версия 1"),
+                   make_judge(delta=2.0)])
+    seen: dict[str, int] = {}
+
+    def on_step(step, state):
+        if step == "analyzer":
+            seen["assumptions"] = len(state.assumptions)
+
+    run_pipeline(llm, candidate, idea_text="сырая идея",
+                run_dir=tmp_path / "run-1", resume=False, on_step=on_step)
+
+    assert seen["assumptions"] == 1
+
+
+def test_pipeline_survives_a_raising_callback(candidate, tmp_path):
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   research_out(("A1", "confirmed")),
+                   refiner_out("версия 1"),
+                   make_judge(delta=2.0)])
+
+    def boom(step, state):
+        raise RuntimeError("проблема с выводом прогресса")
+
+    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+                         run_dir=tmp_path / "run-1", resume=False,
+                         on_step=boom)
+
+    assert state.stop_reason == "assumptions_exhausted"

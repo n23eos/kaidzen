@@ -103,18 +103,25 @@ def apply_judge_verdict(state: RunState, judge: JudgeResult,
 
 
 def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
-                 resume: bool = False) -> RunState:
+                 resume: bool = False,
+                 on_step: Callable[[str, RunState], None] | None = None
+                 ) -> RunState:
     """Полный прогон: Analyzer один раз, затем цикл Researcher→Refiner→Judge.
 
     Состояние сохраняется после каждого завершённого шага, поэтому прогон,
     убитый Ctrl+C или падением API, продолжается с того же места (resume=True)
     и не переплачивает за уже сделанные шаги.
+
+    on_step, если задан, вызывается после каждого завершённого шага (уже
+    сохранённого в state.json) с именем шага и текущим состоянием — это
+    единственный способ показать пользователю живой прогресс во время
+    платного многоминутного прогона.
     """
     state = load_state(run_dir) if resume else _new_state(candidate, idea_text,
                                                           run_dir)
     loop = candidate.config.loop
     if state.analysis is None:
-        _step_analyzer(llm, candidate, state, run_dir)
+        _step_analyzer(llm, candidate, state, run_dir, on_step)
 
     # с какого шага продолжаем прерванную итерацию (None = с её начала)
     entry = state.last_completed_step if resume else None
@@ -124,11 +131,11 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
             reason = check_stop(state, loop)
             if reason:
                 return _finish(state, run_dir, llm, reason)
-            if not _step_researcher(llm, candidate, state, run_dir, loop):
+            if not _step_researcher(llm, candidate, state, run_dir, loop, on_step):
                 return _finish(state, run_dir, llm, STOP_ASSUMPTIONS_EXHAUSTED)
         if entry in (None, STEP_RESEARCHER):
-            _step_refiner(llm, candidate, state, run_dir)
-        _step_judge(llm, candidate, state, run_dir, loop)
+            _step_refiner(llm, candidate, state, run_dir, on_step)
+        _step_judge(llm, candidate, state, run_dir, loop, on_step)
         entry = None
 
 
@@ -139,18 +146,22 @@ def _new_state(candidate: Candidate, idea_text: str, run_dir: Path) -> RunState:
 
 
 def _step_analyzer(llm, candidate: Candidate, state: RunState,
-                   run_dir: Path) -> None:
+                   run_dir: Path,
+                   on_step: Callable[[str, RunState], None] | None = None
+                   ) -> None:
     """Раскладывает сырую идею и заполняет реестр допущений."""
     out = _with_retry(lambda: run_analyzer(llm, candidate,
                                            idea_text=state.original_idea))
     state.analysis = Analysis(problem=out.problem, audience=out.audience,
                               mechanism=out.mechanism, unknowns=out.unknowns)
     state.assumptions = list(out.assumptions)
-    _checkpoint(state, run_dir, llm, STEP_ANALYZER)
+    _checkpoint(state, run_dir, llm, STEP_ANALYZER, on_step)
 
 
 def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
-                     loop: LoopConfig) -> bool:
+                     loop: LoopConfig,
+                     on_step: Callable[[str, RunState], None] | None = None
+                     ) -> bool:
     """Проверяет самые рисковые допущения. False = проверять больше нечего."""
     selected = select_assumptions(state.assumptions,
                                   loop.assumptions_per_iteration)
@@ -163,7 +174,7 @@ def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
     # находки нужны Refiner'у целиком; в реестр попадают только статус и факты,
     # поэтому сырой JSON кладём в состояние — иначе возобновление их потеряет
     state.pending_findings = out.model_dump_json()
-    _checkpoint(state, run_dir, llm, STEP_RESEARCHER)
+    _checkpoint(state, run_dir, llm, STEP_RESEARCHER, on_step)
     return True
 
 
@@ -179,7 +190,9 @@ def _apply_findings(state: RunState, researcher_output) -> None:
 
 
 def _step_refiner(llm, candidate: Candidate, state: RunState,
-                  run_dir: Path) -> None:
+                  run_dir: Path,
+                  on_step: Callable[[str, RunState], None] | None = None
+                  ) -> None:
     """Переписывает идею по находкам и критике прошлого Judge."""
     current = state.current_version()
     critique = current.judge.critique if current and current.judge else []
@@ -189,11 +202,13 @@ def _step_refiner(llm, candidate: Candidate, state: RunState,
     state.versions.append(Version(n=len(state.versions) + 1,
                                   idea_text=out.idea_text,
                                   changelog=out.changelog))
-    _checkpoint(state, run_dir, llm, STEP_REFINER)
+    _checkpoint(state, run_dir, llm, STEP_REFINER, on_step)
 
 
 def _step_judge(llm, candidate: Candidate, state: RunState, run_dir: Path,
-                loop: LoopConfig) -> None:
+                loop: LoopConfig,
+                on_step: Callable[[str, RunState], None] | None = None
+                ) -> None:
     """Оценивает новую версию и применяет вердикт."""
     new_version = state.versions[-1]
     judge = _with_retry(lambda: run_judge(
@@ -203,7 +218,7 @@ def _step_judge(llm, candidate: Candidate, state: RunState, run_dir: Path,
     apply_judge_verdict(state, judge, loop)
     state.iteration += 1
     state.pending_findings = None
-    _checkpoint(state, run_dir, llm, STEP_JUDGE)
+    _checkpoint(state, run_dir, llm, STEP_JUDGE, on_step)
 
 
 def _idea_before_last_version(state: RunState) -> str:
@@ -236,9 +251,19 @@ def _with_retry(call: Callable[[], T]) -> T:
     raise AssertionError("недостижимо")  # pragma: no cover
 
 
-def _checkpoint(state: RunState, run_dir: Path, llm, step: str) -> None:
+def _checkpoint(state: RunState, run_dir: Path, llm, step: str,
+                on_step: Callable[[str, RunState], None] | None = None
+                ) -> None:
     state.last_completed_step = step
     _save(state, run_dir, llm)
+    if on_step is None:
+        return
+    try:
+        on_step(step, state)
+    except Exception:
+        # прогресс в stdout — украшение, а не часть платного прогона:
+        # упавший колбэк не должен убивать уже сделанную (и оплаченную) работу
+        pass
 
 
 def _finish(state: RunState, run_dir: Path, llm, reason: str) -> RunState:

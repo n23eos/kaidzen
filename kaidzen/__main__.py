@@ -16,7 +16,8 @@ from pydantic import BaseModel
 
 from kaidzen.candidate import Candidate, load_candidate
 from kaidzen.llm import LLMClient
-from kaidzen.orchestrator import run_pipeline
+from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
+                                  STEP_RESEARCHER, run_pipeline)
 from kaidzen.report import build_report
 from kaidzen.state import ApiUsage, RunState, load_state, save_state
 
@@ -95,20 +96,60 @@ def _print_start(run_dir: Path, candidate: Candidate) -> None:
           f"до {candidate.config.loop.max_iterations} итераций)")
 
 
-def _print_iterations(state: RunState) -> None:
-    """Итерации печатаются постфактум по state.versions.
+class ProgressPrinter:
+    """Печатает ход прогона в stdout по мере готовности каждого шага.
 
-    Оркестратор не отдаёт колбэки по ходу цикла, а трогать его ради этого
-    не стали: детали итераций всё равно целиком лежат в состоянии.
+    Передаётся в run_pipeline как on_step, поэтому пользователь видит номер
+    итерации, проверяемые допущения, вердикты и оценки Judge не постфактум,
+    а в реальном времени — иначе платный многоминутный прогон неотличим
+    от зависшего терминала.
+
+    Для шага Researcher колбэк получает всё состояние целиком, а не только
+    свежие находки, поэтому принтер сам хранит статусы допущений с прошлого
+    вызова и печатает только то, что изменилось именно сейчас.
     """
-    for version in state.versions:
+
+    def __init__(self) -> None:
+        self._last_statuses: dict[str, str] = {}
+
+    def __call__(self, step: str, state: RunState) -> None:
+        if step == STEP_ANALYZER:
+            self._print_analyzer(state)
+        elif step == STEP_RESEARCHER:
+            self._print_researcher(state)
+        elif step == STEP_REFINER:
+            self._print_refiner(state)
+        elif step == STEP_JUDGE:
+            self._print_judge(state)
+
+    def _print_analyzer(self, state: RunState) -> None:
+        high = sum(1 for a in state.assumptions if a.criticality == "high")
+        print(f"[analyzer] допущений найдено: {len(state.assumptions)}, "
+              f"из них критичных: {high}")
+        self._remember(state)
+
+    def _print_researcher(self, state: RunState) -> None:
+        checked = [a for a in state.assumptions
+                  if self._last_statuses.get(a.id) != a.status]
+        verdicts = ", ".join(f"{a.id}={a.status}" for a in checked)
+        print(f"[researcher] проверены допущения: {verdicts or 'нет'}")
+        self._remember(state)
+
+    def _print_refiner(self, state: RunState) -> None:
+        version = state.versions[-1]
+        print(f"[refiner] готова новая версия идеи: v{version.n}")
+
+    def _print_judge(self, state: RunState) -> None:
+        version = state.versions[-1]
         if version.rolled_back:
-            print(f"  итерация {version.n}: версия откачена судьёй")
-        elif version.judge is not None:
-            print(f"  итерация {version.n}: оценка {version.judge.total:.1f} "
-                  f"(дельта {version.judge.delta_vs_previous:+.1f})")
-        else:
-            print(f"  итерация {version.n}: без оценки")
+            print(f"[judge] итерация {state.iteration}: версия откачена")
+            return
+        judge = version.judge
+        print(f"[judge] итерация {state.iteration}: оценка {judge.total:.1f} "
+              f"(дельта {judge.delta_vs_previous:+.1f})")
+
+    def _remember(self, state: RunState) -> None:
+        self._last_statuses = {a.id: a.status for a in state.assumptions}
 
 
 def _print_finish(state: RunState, report_path: Path) -> None:
@@ -152,8 +193,11 @@ def _write_report(state: RunState, run_dir: Path, summary_text: str) -> Path:
 
 
 def _finish_run(llm, state: RunState, run_dir: Path) -> None:
-    """Общий хвост run и resume: резюме, отчёт, итоговая сводка."""
-    _print_iterations(state)
+    """Общий хвост run и resume: резюме, отчёт, итоговая сводка.
+
+    Ход итераций пользователь уже видел вживую через ProgressPrinter — здесь
+    печатается только финальная сводка, без повторного прохода по versions.
+    """
     summary = _generate_summary(llm, state)
     save_state(state, run_dir)  # расход на резюме тоже должен попасть в state
     _print_finish(state, _write_report(state, run_dir, summary))
@@ -174,7 +218,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     _print_start(run_dir, candidate)
     llm = LLMClient()
-    state = run_pipeline(llm, candidate, idea_text=idea_text, run_dir=run_dir)
+    state = run_pipeline(llm, candidate, idea_text=idea_text, run_dir=run_dir,
+                         on_step=ProgressPrinter())
     _finish_run(llm, state, run_dir)
 
 
@@ -190,7 +235,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
     _print_start(run_dir, candidate)
     llm = LLMClient()
     state = run_pipeline(llm, candidate, idea_text=saved.original_idea,
-                         run_dir=run_dir, resume=True)
+                         run_dir=run_dir, resume=True,
+                         on_step=ProgressPrinter())
     _finish_run(llm, state, run_dir)
 
 
