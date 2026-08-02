@@ -7,6 +7,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ROLES = ("analyzer", "researcher", "refiner", "judge")
+# отдельно от ROLES: reporter не имеет своего файла промпта (см. load_candidate),
+# но модель для него обязана быть задана — иначе executive summary падает
+# только в самом конце оплаченного прогона (__main__._generate_summary)
+REPORTER_ROLE = "reporter"
+REQUIRED_MODEL_ROLES = ROLES + (REPORTER_ROLE,)
 RUBRIC_AXES = 5
 
 # границы параметров цикла: за ними прогон либо не стартует,
@@ -61,10 +66,10 @@ class CandidateConfig(BaseModel):
     @field_validator("models")
     @classmethod
     def check_models(cls, v: dict[str, str]) -> dict[str, str]:
-        missing = [r for r in ROLES if r not in v]
+        missing = [r for r in REQUIRED_MODEL_ROLES if r not in v]
         if missing:
             raise ValueError(f"models: не заданы модели для ролей {missing}")
-        blank = [r for r in ROLES if not v[r].strip()]
+        blank = [r for r in REQUIRED_MODEL_ROLES if not v[r].strip()]
         if blank:
             raise ValueError(f"models: пустое имя модели для ролей {blank}")
         return v

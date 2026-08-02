@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from kaidzen import __main__ as cli
 from kaidzen.state import (ApiUsage, Assumption, JudgeResult, RunState, Version,
                            load_state)
+from tests.test_candidate import make_candidate
 
 
 class ExplodingLLM:
@@ -175,6 +177,46 @@ def test_report_command_fails_clearly_without_state(tmp_path):
 
 # --- команда resume --------------------------------------------------------
 
+def test_resume_candidate_dir_uses_recorded_path_when_present(tmp_path):
+    """Прогон, запущенный с --candidate вне CANDIDATES_ROOT, должен грузить
+    промпты из ЭТОГО каталога на resume, а не из candidates/<candidate_id>,
+    где может лежать другой кандидат с тем же именем."""
+    # Arrange
+    recorded_dir = tmp_path / "elsewhere" / "my-candidate"
+    recorded_dir.mkdir(parents=True)
+    state = RunState(run_id="r", candidate_id="my-candidate",
+                     config={"candidate_dir": str(recorded_dir)},
+                     original_idea="и")
+
+    # Act
+    result = cli._resume_candidate_dir(state)
+
+    # Assert
+    assert result == recorded_dir
+
+
+def test_resume_candidate_dir_falls_back_when_key_absent(tmp_path, monkeypatch):
+    """state.json старого прогона без candidate_dir — прежнее поведение."""
+    monkeypatch.setattr(cli, "CANDIDATES_ROOT", tmp_path / "candidates")
+    state = RunState(run_id="r", candidate_id="gen000-generic", config={},
+                     original_idea="и")
+
+    result = cli._resume_candidate_dir(state)
+
+    assert result == tmp_path / "candidates" / "gen000-generic"
+
+
+def test_resume_candidate_dir_fails_clearly_when_recorded_dir_missing(tmp_path):
+    state = RunState(run_id="r", candidate_id="my-candidate",
+                     config={"candidate_dir": str(tmp_path / "gone")},
+                     original_idea="и")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        cli._resume_candidate_dir(state)
+
+    assert str(tmp_path / "gone") in str(exc.value)
+
+
 def test_resume_refuses_finished_run(tmp_path, monkeypatch):
     # Arrange
     monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
@@ -232,6 +274,43 @@ def test_run_fails_clearly_when_idea_file_missing(tmp_path, monkeypatch):
         cli.main(["run", str(missing)])
 
     assert str(missing) in str(exc.value)
+
+
+def test_run_refuses_to_overwrite_existing_run_dir(tmp_path, monkeypatch):
+    """Два прогона одной идеи в ту же секунду не должны затирать state.json
+    друг друга: полностью оплаченный прогон нельзя потерять молча."""
+    # Arrange
+    monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(cli, "RUNS_ROOT", tmp_path / "runs")
+    idea_path = tmp_path / "idea.md"
+    idea_path.write_text("Идея.", encoding="utf-8")
+    candidate_dir = make_candidate(tmp_path / "cand")
+    fixed_now = datetime(2026, 8, 3, 12, 15, 0)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(cli, "datetime", FixedDatetime)
+    expected_run_dir = cli.make_run_dir(
+        runs_root=tmp_path / "runs", idea_path=idea_path,
+        now_str=fixed_now.strftime(cli.RUN_DIR_TIMESTAMP_FORMAT))
+    make_state_file(expected_run_dir)
+
+    # Act
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", str(idea_path), "--candidate", str(candidate_dir)])
+
+    # Assert
+    assert str(expected_run_dir) in str(exc.value)
+
+
+def test_run_dir_timestamp_includes_seconds():
+    """Секунды в имени каталога сужают окно коллизии, но guard выше — это
+    настоящая защита (см. test_run_refuses_to_overwrite_existing_run_dir)."""
+    assert "%S" in cli.RUN_DIR_TIMESTAMP_FORMAT
 
 
 # --- вывод хода и завершение прогона --------------------------------------
@@ -317,6 +396,18 @@ def test_progress_printer_judge_reports_iteration_score_and_delta(capsys):
     assert "итерация 1" in out and "7.0" in out and "+2.0" in out
 
 
+def test_progress_printer_prints_warning_step(capsys):
+    """orchestrator шлёт предупреждения через on_step с префиксом STEP_WARNING —
+    без ветки в ProgressPrinter они молча теряются (см. orchestrator._notify)."""
+    state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и")
+    step = f"{cli.STEP_WARNING}: Researcher вернул находки по неизвестным допущениям: A9"
+
+    cli.ProgressPrinter()(step, state)
+
+    out = capsys.readouterr().out
+    assert "Researcher вернул находки по неизвестным допущениям: A9" in out
+
+
 def test_progress_printer_judge_reports_rollback(capsys):
     state = RunState(run_id="r", candidate_id="c", config={}, original_idea="и",
                      iteration=1,
@@ -355,6 +446,37 @@ def test_finish_run_writes_report_with_summary_and_prints_usage(
     assert "11 входных, 22 выходных" in out and "веб-поисков: 3" in out
     # расход на резюме должен осесть и в state.json, а не только в отчёте
     assert load_state(run_dir).api_usage.input_tokens == 11
+
+
+class FailingSummaryLLM:
+    """Падает на каждом вызове structured — как реальный API-сбой без ретрая."""
+
+    def __init__(self):
+        self.usage = ApiUsage(input_tokens=5, output_tokens=5, web_searches=0)
+
+    def structured(self, **kwargs):
+        raise RuntimeError("сеть недоступна")
+
+
+def test_finish_run_writes_report_when_summary_call_fails(tmp_path, capsys, candidate):
+    """Единственный незащищённый ретраем вызов не должен хоронить оплаченный
+    прогон: отчёт обязан появиться даже если резюме не сгенерировалось."""
+    # Arrange
+    run_dir = tmp_path / "2026-08-03-1215-idea"
+    run_dir.mkdir()
+    state = make_finished_state(run_dir)
+    llm = FailingSummaryLLM()
+
+    # Act
+    cli._finish_run(llm, with_reporter(candidate), state, run_dir)
+
+    # Assert
+    report_path = run_dir / "report.md"
+    assert report_path.exists()
+    assert cli.REBUILT_SUMMARY in report_path.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert "резюме" in out.lower()
+    assert "report.md" in out or str(report_path) in out
 
 
 def test_summary_model_comes_from_candidate_config(tmp_path, candidate):
@@ -402,6 +524,17 @@ def test_print_start_shows_run_and_candidate(candidate, capsys):
     out = capsys.readouterr().out
     assert "2026-08-03-1215-idea" in out
     assert candidate.candidate_id in out
+
+
+def test_print_start_accepts_max_iterations_override(candidate, capsys):
+    """При resume лимит берётся из снапшота state.config, а не из кандидата —
+    иначе прогон, начатый с --max-iter, печатал бы чужое число на resume."""
+    cli._print_start(Path("runs/2026-08-03-1215-idea"), candidate,
+                     max_iterations=99)
+
+    out = capsys.readouterr().out
+    assert "до 99 итераций" in out
+    assert f"до {candidate.config.loop.max_iterations} итераций" not in out
 
 
 def test_apply_max_iter_returns_new_candidate_without_mutating(candidate):

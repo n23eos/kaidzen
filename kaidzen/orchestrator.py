@@ -148,6 +148,7 @@ def _previous_scored_total(state: RunState) -> float | None:
 
 def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
                  resume: bool = False,
+                 candidate_dir: Path | None = None,
                  on_step: Callable[[str, RunState], None] | None = None
                  ) -> RunState:
     """Полный прогон: Analyzer один раз, затем цикл Researcher→Refiner→Judge.
@@ -172,7 +173,7 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
     state.candidate_id, ничего не подмешивая в его конфиг.
     """
     state = load_state(run_dir) if resume else _new_state(candidate, idea_text,
-                                                          run_dir)
+                                                          run_dir, candidate_dir)
     loop = _loop_from_state(state) if resume else candidate.config.loop
     if state.analysis is None:
         _step_analyzer(llm, candidate, state, run_dir, on_step)
@@ -207,10 +208,18 @@ def _loop_from_state(state: RunState) -> LoopConfig:
     return LoopConfig.model_validate(loop_data)
 
 
-def _new_state(candidate: Candidate, idea_text: str, run_dir: Path) -> RunState:
+def _new_state(candidate: Candidate, idea_text: str, run_dir: Path,
+               candidate_dir: Path | None = None) -> RunState:
+    """candidate_dir попадает в снапшот конфига, чтобы resume (см.
+    __main__._resume_candidate_dir) грузил промпты из того же каталога, с
+    которым прогон был запущен, а не из candidates/<candidate_id> — при
+    --candidate вне CANDIDATES_ROOT это может быть другой кандидат.
+    """
+    config = candidate.config.model_dump()
+    if candidate_dir is not None:
+        config["candidate_dir"] = str(candidate_dir)
     return RunState(run_id=run_dir.name, candidate_id=candidate.candidate_id,
-                    config=candidate.config.model_dump(),
-                    original_idea=idea_text)
+                    config=config, original_idea=idea_text)
 
 
 def _step_analyzer(llm, candidate: Candidate, state: RunState,

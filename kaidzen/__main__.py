@@ -17,7 +17,8 @@ from pydantic import BaseModel
 from kaidzen.candidate import Candidate, load_candidate
 from kaidzen.llm import LLMClient
 from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
-                                  STEP_RESEARCHER, run_pipeline)
+                                  STEP_RESEARCHER, STEP_WARNING,
+                                  _loop_from_state, run_pipeline)
 from kaidzen.report import build_report
 from kaidzen.state import ApiUsage, RunState, load_state, save_state
 
@@ -32,7 +33,7 @@ SUMMARY_SYSTEM = (
     "проверено. Пиши по-русски, без воды и без маркетинговых прилагательных."
 )
 
-RUN_DIR_TIMESTAMP_FORMAT = "%Y-%m-%d-%H%M"
+RUN_DIR_TIMESTAMP_FORMAT = "%Y-%m-%d-%H%M%S"
 CHAMPION_PREFIX = "CHAMPION-"
 CANDIDATES_ROOT = Path("candidates")
 RUNS_ROOT = Path("runs")
@@ -81,6 +82,27 @@ def slugify(text: str) -> str:
     return slug or FALLBACK_SLUG
 
 
+def _resume_candidate_dir(saved: RunState) -> Path:
+    """Каталог кандидата, с которым прогон был запущен.
+
+    Свежие прогоны кладут абсолютный путь в state.config["candidate_dir"]
+    (см. orchestrator._new_state) — resume обязан грузить промпты именно
+    оттуда: --candidate мог указывать на каталог вне CANDIDATES_ROOT, и
+    candidates/<candidate_id> при этом либо не существует, либо содержит
+    совсем другого кандидата с тем же именем. Старые state.json без этого
+    ключа возвращаются к прежнему поведению.
+    """
+    recorded = saved.config.get("candidate_dir")
+    if recorded is None:
+        return CANDIDATES_ROOT / saved.candidate_id
+    path = Path(recorded)
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"каталог кандидата, с которым был запущен прогон {saved.run_id}, "
+            f"не найден: {path}")
+    return path
+
+
 def apply_max_iter(candidate: Candidate, max_iter: int | None) -> Candidate:
     """Новый кандидат с изменённым лимитом итераций (исходный не меняем)."""
     if max_iter is None:
@@ -92,11 +114,21 @@ def apply_max_iter(candidate: Candidate, max_iter: int | None) -> Candidate:
 
 # --- вывод хода прогона ----------------------------------------------------
 
-def _print_start(run_dir: Path, candidate: Candidate) -> None:
+def _print_start(run_dir: Path, candidate: Candidate,
+                 max_iterations: int | None = None) -> None:
+    """max_iterations — лимит, действующий на этот прогон.
+
+    По умолчанию берётся из candidate.config.loop (свежий run). При resume
+    вызывающий код обязан передать лимит из снапшота state.config
+    (orchestrator._loop_from_state) — именно он, а не конфиг кандидата,
+    управляет остановкой цикла в run_pipeline (ТЗ §5).
+    """
+    limit = (max_iterations if max_iterations is not None
+             else candidate.config.loop.max_iterations)
     print(f"Прогон: {run_dir.name}")
     print(f"Кандидат: {candidate.candidate_id} "
           f"(домен {candidate.config.domain}, "
-          f"до {candidate.config.loop.max_iterations} итераций)")
+          f"до {limit} итераций)")
 
 
 class ProgressPrinter:
@@ -124,6 +156,8 @@ class ProgressPrinter:
             self._print_refiner(state)
         elif step == STEP_JUDGE:
             self._print_judge(state)
+        elif step.startswith(STEP_WARNING):
+            self._print_warning(step)
 
     def _print_analyzer(self, state: RunState) -> None:
         high = sum(1 for a in state.assumptions if a.criticality == "high")
@@ -150,6 +184,12 @@ class ProgressPrinter:
         judge = version.judge
         print(f"[judge] итерация {state.iteration}: оценка {judge.total:.1f} "
               f"(дельта {judge.delta_vs_previous:+.1f})")
+
+    def _print_warning(self, step: str) -> None:
+        # step имеет вид "warning: <текст>" (см. orchestrator._notify) —
+        # печатаем сам текст, не задваивая префикс
+        message = step[len(STEP_WARNING) + 1:].strip()
+        print(f"[{STEP_WARNING}] {message}")
 
     def _remember(self, state: RunState) -> None:
         self._last_statuses = {a.id: a.status for a in state.assumptions}
@@ -212,9 +252,25 @@ def _finish_run(llm, candidate: Candidate, state: RunState,
     Ход итераций пользователь уже видел вживую через ProgressPrinter — здесь
     печатается только финальная сводка, без повторного прохода по versions.
     """
-    summary = _generate_summary(llm, candidate, state)
+    summary = _safe_generate_summary(llm, candidate, state)
     save_state(state, run_dir)  # расход на резюме тоже должен попасть в state
     _print_finish(state, _write_report(state, run_dir, summary))
+
+
+def _safe_generate_summary(llm, candidate: Candidate, state: RunState) -> str:
+    """Резюме без риска потерять уже оплаченный прогон.
+
+    _generate_summary — единственный вызов LLM без ретрая run_pipeline; цикл к
+    этому моменту полностью оплачен и завершён, поэтому падение здесь не
+    должно оставить пользователя без report.md и с голым трейсбеком. При
+    ошибке подставляем ту же заглушку, что и офлайн-пересборка (REBUILT_SUMMARY),
+    и явно говорим об этом в stdout — отчёт всё равно пишется.
+    """
+    try:
+        return _generate_summary(llm, candidate, state)
+    except Exception as e:
+        print(f"Не удалось сгенерировать резюме ({e}); report.md записан без него.")
+        return REBUILT_SUMMARY
 
 
 # --- команды ---------------------------------------------------------------
@@ -229,10 +285,18 @@ def cmd_run(args: argparse.Namespace) -> None:
     candidate = apply_max_iter(load_candidate(candidate_dir), args.max_iter)
     run_dir = make_run_dir(runs_root=RUNS_ROOT, idea_path=idea_path,
                            now_str=datetime.now().strftime(RUN_DIR_TIMESTAMP_FORMAT))
+    if (run_dir / "state.json").exists():
+        # секунды в имени каталога сужают окно коллизии, но не закрывают его;
+        # настоящая защита от затирания оплаченного прогона — этот отказ
+        sys.exit(f"Каталог прогона уже существует и содержит state.json: "
+                 f"{run_dir}. Возможно, прогон для этой идеи уже запущен "
+                 f"в эту секунду — подождите и повторите, чтобы не затереть "
+                 f"чужой state.json.")
     run_dir.mkdir(parents=True, exist_ok=True)
     _print_start(run_dir, candidate)
     llm = LLMClient()
     state = run_pipeline(llm, candidate, idea_text=idea_text, run_dir=run_dir,
+                         candidate_dir=candidate_dir.resolve(),
                          on_step=ProgressPrinter())
     _finish_run(llm, candidate, state, run_dir)
 
@@ -245,8 +309,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
         sys.exit(f"Прогон {saved.run_id} уже завершён "
                  f"(причина: {saved.stop_reason}). Чтобы пересобрать отчёт: "
                  f"python -m kaidzen report {run_dir}")
-    candidate = load_candidate(CANDIDATES_ROOT / saved.candidate_id)
-    _print_start(run_dir, candidate)
+    candidate = load_candidate(_resume_candidate_dir(saved))
+    _print_start(run_dir, candidate, max_iterations=_loop_from_state(saved).max_iterations)
     llm = LLMClient()
     state = run_pipeline(llm, candidate, idea_text=saved.original_idea,
                          run_dir=run_dir, resume=True,

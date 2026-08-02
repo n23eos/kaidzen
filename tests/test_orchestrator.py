@@ -258,6 +258,25 @@ def test_pipeline_runs_one_iteration_and_stops_on_exhausted(candidate, tmp_path)
     assert load_state(run_dir) == state
 
 
+def test_pipeline_records_candidate_dir_in_config_snapshot(candidate, tmp_path):
+    """resume должен грузить промпты из ТОГО ЖЕ каталога, с которым прогон
+    стартовал (см. __main__._resume_candidate_dir) — путь обязан попасть в
+    state.config уже на первом checkpoint'е (после analyzer), а не только
+    в конце прогона, иначе прерванный Ctrl+C прогон его не сохранит."""
+    run_dir = tmp_path / "run-1"
+    candidate_dir = tmp_path / "candidates" / "my-candidate"
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   research_out(("A1", "confirmed")),
+                   refiner_out("версия 1"),
+                   make_judge(delta=2.0)])
+
+    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+                         run_dir=run_dir, resume=False,
+                         candidate_dir=candidate_dir)
+
+    assert state.config["candidate_dir"] == str(candidate_dir)
+
+
 def test_pipeline_passes_previous_idea_and_critique_to_roles(candidate, tmp_path):
     llm = FakeLLM([analyzer_out(medium("A1"), medium("A2")),
                    research_out(("A1", "confirmed")),

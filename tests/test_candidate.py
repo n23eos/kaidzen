@@ -21,6 +21,7 @@ models:
   researcher: claude-sonnet-5
   refiner: claude-sonnet-5
   judge: claude-sonnet-5
+  reporter: claude-sonnet-5
 """
 
 PROMPTS = ["analyzer.md", "researcher.md", "refiner.md", "judge.md"]
@@ -59,6 +60,14 @@ def test_rubric_must_have_5_axes(tmp_path):
 def test_models_must_cover_all_roles(tmp_path):
     bad = VALID_CONFIG.replace("  judge: claude-sonnet-5\n", "")
     with pytest.raises(ValueError, match="judge"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_models_must_include_reporter(tmp_path):
+    """Пятая роль: executive summary читает models.reporter в конце прогона —
+    без проверки при загрузке конфиг ломается только после оплаченного цикла."""
+    bad = VALID_CONFIG.replace("  reporter: claude-sonnet-5\n", "")
+    with pytest.raises(ValueError, match="reporter"):
         load_candidate(make_candidate(tmp_path, bad))
 
 
@@ -139,6 +148,7 @@ def test_loop_defaults_when_section_absent(tmp_path):
   researcher: m
   refiner: m
   judge: m
+  reporter: m
 """
     c = load_candidate(make_candidate(tmp_path, bare))
     assert c.config.loop.max_iterations == 6
