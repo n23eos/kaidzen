@@ -84,9 +84,32 @@ def _render_rubric(state: RunState) -> str:
     return "\n".join(lines)
 
 
+def _unverified(state: RunState) -> list[Assumption]:
+    return [a for a in state.assumptions if a.status == "unverified"]
+
+
+def _assumptions_summary(state: RunState) -> str:
+    """Одна строка над таблицей: сколько допущений реально закрыто.
+
+    Прогон, не закрывший ни одного допущения, должен быть виден сразу, а не
+    вычисляться пользователем глазами по колонке «статус».
+    """
+    total = len(state.assumptions)
+    if not total:
+        return "Реестр допущений пуст."
+    open_count = len(_unverified(state))
+    if open_count == total:
+        return ("**Ни одно допущение не проверено: прогон не закрыл фактами "
+                f"ни одного из {total}.**")
+    return (f"Закрыто {total - open_count} из {total} допущений; "
+            f"осталось непроверенных: {open_count}.")
+
+
 def _render_assumptions(state: RunState) -> str:
     lines = [
         "## Допущения",
+        "",
+        _assumptions_summary(state),
         "",
         "| id | текст | критичность | статус | факты |",
         "| --- | --- | --- | --- | --- |",
@@ -118,18 +141,36 @@ def _render_evolution(state: RunState) -> str:
 
 
 def _render_next_steps(state: RunState) -> str:
+    """Открытые вопросы прогона: сначала непроверенное, потом непроверяемое.
+
+    Непроверенные допущения идут первыми: «untestable» — честный результат
+    работы, а «unverified» — это работа, которая НЕ сделана, и говорить в
+    таком прогоне «всё проверено» значит врать пользователю.
+    """
     lines = ["## Next steps", ""]
+    if not state.assumptions:
+        lines.append("Реестр допущений пуст — проверять было нечего.")
+        return "\n".join(lines)
+
+    unverified = _unverified(state)
     untestable = [a for a in state.assumptions if a.status == "untestable"]
-    if not untestable:
+    if not unverified and not untestable:
         lines.append(
             "Все допущения проверены по источникам — экспериментов в реальном мире не требуется."
         )
         return "\n".join(lines)
 
-    lines.append("Эти допущения можно проверить только реальным экспериментом:")
-    lines.append("")
-    for a in untestable:
-        lines.append(f"- [{a.id}] {a.text}")
+    if unverified:
+        lines.append("Эти допущения остались непроверенными — прогон не закрыл "
+                     "их фактами:")
+        lines.append("")
+        lines.extend(f"- [{a.id}] {a.text}" for a in unverified)
+        if untestable:
+            lines.append("")
+    if untestable:
+        lines.append("Эти допущения можно проверить только реальным экспериментом:")
+        lines.append("")
+        lines.extend(f"- [{a.id}] {a.text}" for a in untestable)
     return "\n".join(lines)
 
 

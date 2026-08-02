@@ -134,6 +134,66 @@ def test_all_checked_wording_when_nothing_untestable():
     assert "провер" in next_steps.lower()  # "все допущения проверены..."
 
 
+def _all_unverified_state() -> RunState:
+    """Прогон, в котором не закрыто ни одно допущение (баг с чужими id)."""
+    state = _full_state()
+    return state.model_copy(update={
+        "assumptions": [a.model_copy(update={"status": "unverified", "facts": []})
+                        for a in state.assumptions]
+    })
+
+
+def test_next_steps_does_not_claim_everything_verified_when_all_unverified():
+    report = build_report(_all_unverified_state())
+    next_steps = report.split("Next steps")[1]
+    assert "Все допущения проверены" not in next_steps
+    assert "непровер" in next_steps.lower()
+
+
+def test_next_steps_lists_unverified_assumptions():
+    report = build_report(_all_unverified_state())
+    next_steps = report.split("Next steps")[1]
+    for text in ("рынок существует", "конкурентов нет"):
+        assert text in next_steps
+
+
+def test_next_steps_lists_both_unverified_and_untestable():
+    state = _full_state()   # A2 untestable, A3 unverified
+    next_steps = build_report(state).split("Next steps")[1]
+    assert "конкурентов нет" in next_steps          # untestable
+    assert "цена приемлема" in next_steps           # unverified
+
+
+def test_next_steps_says_all_verified_only_when_nothing_open():
+    state = _full_state()
+    closed = state.model_copy(update={
+        "assumptions": [a.model_copy(update={"status": "confirmed"})
+                        for a in state.assumptions]
+    })
+    next_steps = build_report(closed).split("Next steps")[1]
+    assert "Все допущения проверены" in next_steps
+
+
+def test_assumptions_section_makes_all_unverified_run_obvious():
+    assumptions = build_report(_all_unverified_state()).split("## Допущения")[1]
+    header = assumptions.split("| id |")[0]
+    assert "Ни одно допущение не проверено" in header
+
+
+def test_assumptions_section_shows_verified_counter():
+    assumptions = build_report(_full_state()).split("## Допущения")[1]
+    header = assumptions.split("| id |")[0]
+    # закрыты A1 и A2, открыто A3
+    assert "2" in header and "3" in header
+
+
+def test_empty_assumption_registry_does_not_claim_success():
+    state = RunState(run_id="r1", candidate_id="c", config={},
+                     original_idea="идея")
+    next_steps = build_report(state).split("Next steps")[1]
+    assert "Все допущения проверены" not in next_steps
+
+
 def test_rolled_back_version_marked_and_excluded_from_rubric():
     state = _full_state()
     rolled = state.model_copy(update={
