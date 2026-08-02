@@ -144,3 +144,52 @@ def test_loop_defaults_when_section_absent(tmp_path):
     assert c.config.loop.max_iterations == 6
     assert c.config.loop.plateau_threshold == 0.5
     assert c.config.loop.assumptions_per_iteration == 3
+
+
+# --- кандидаты, поставляемые в репозитории -----------------------------------
+
+REPO_CANDIDATES = Path(__file__).parent.parent / "candidates"
+SHIPPED_DOMAINS = ["generic", "business", "games"]
+# заглушка вида "prompt judge.md" проходит валидацию, но промптом не является
+MIN_PROMPT_LENGTH = 200
+
+
+@pytest.fixture(params=SHIPPED_DOMAINS)
+def shipped(request) -> Candidate:
+    return load_candidate(REPO_CANDIDATES / f"gen000-{request.param}")
+
+
+def test_shipped_candidate_loads(shipped):
+    assert shipped.candidate_id.startswith("gen000-")
+    assert shipped.config.domain.strip()
+
+
+def test_shipped_candidate_rubric(shipped):
+    assert "groundedness" in shipped.config.rubric
+    assert len(shipped.config.rubric) == 5
+
+
+@pytest.mark.parametrize("domain", SHIPPED_DOMAINS)
+def test_champion_file_points_at_loadable_candidate(domain):
+    champ = (REPO_CANDIDATES / f"CHAMPION-{domain}").read_text(
+        encoding="utf-8").strip()
+    assert champ == f"gen000-{domain}"
+    assert load_candidate(REPO_CANDIDATES / champ).candidate_id == champ
+
+
+def test_shipped_prompts_are_not_stubs(shipped):
+    for role, text in shipped.prompts.items():
+        assert len(text) > MIN_PROMPT_LENGTH, f"{shipped.candidate_id}/{role}"
+
+
+def test_shipped_judge_prompt_states_total_is_sum(shipped):
+    """Без этого правила JudgeResult валит валидацию и прогон жжёт ретраи."""
+    judge = shipped.prompts["judge"]
+    assert "total" in judge
+    assert "сумм" in judge.lower()
+
+
+def test_shipped_researcher_prompt_forbids_invented_urls(shipped):
+    researcher = shipped.prompts["researcher"].lower()
+    assert "придумывать" in researcher
+    assert "запрещено" in researcher
