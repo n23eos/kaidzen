@@ -88,9 +88,15 @@ def make_client(responses):
     return client, fake
 
 
-def good(block_id="tu_ok"):
+def good(block_id="tu_ok", searches=None):
     return FakeResponse([FakeBlock("tool_use", id=block_id, name="submit",
-                                   input={"answer": "ok", "score": 7})])
+                                   input={"answer": "ok", "score": 7})],
+                        searches=searches)
+
+
+def searched(block_id="tu_ok"):
+    """Успешный ответ, в котором поиск действительно выполнялся."""
+    return good(block_id=block_id, searches=1)
 
 
 def missing_field(block_id="tu_bad"):
@@ -123,7 +129,7 @@ def test_forces_tool_choice_without_web_search():
 
 
 def test_web_search_adds_tool_and_drops_tool_choice():
-    client, fake = make_client([good()])
+    client, fake = make_client([searched()])
     client.structured(model="m", system="s", user="u", schema=Out,
                       effort="low", web_search=True, max_searches=5)
     call = fake.calls[0]
@@ -177,7 +183,7 @@ def test_retry_when_model_never_calls_submit():
 def test_pause_turn_continues_without_spending_schema_retry():
     """pause_turn — не ошибка схемы: продолжаем ход и сохраняем бюджет retry."""
     pause = paused()
-    client, fake = make_client([pause, missing_field(), good()])
+    client, fake = make_client([pause, missing_field(), searched()])
     out = client.structured(model="m", system="s", user="u", schema=Out,
                             effort="low", web_search=True)
     assert out.score == 7
@@ -285,7 +291,7 @@ def test_default_max_tokens_leaves_room_for_thinking():
 
 
 def test_web_search_tool_type_is_current():
-    client, fake = make_client([good()])
+    client, fake = make_client([searched()])
     client.structured(model="m", system="s", user="u", schema=Out,
                       effort="low", web_search=True)
     web = [t for t in fake.calls[0]["tools"] if t.get("name") == "web_search"][0]
@@ -294,7 +300,7 @@ def test_web_search_tool_type_is_current():
 
 def test_no_code_execution_tool_alongside_web_search():
     """Динамическая фильтрация сама запускает код: второе окружение мешает."""
-    client, fake = make_client([good()])
+    client, fake = make_client([searched()])
     client.structured(model="m", system="s", user="u", schema=Out,
                       effort="low", web_search=True)
     types = [t.get("type", "") for t in fake.calls[0]["tools"]]
