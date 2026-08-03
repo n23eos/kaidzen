@@ -617,6 +617,10 @@ def _add_evolve_commands(sub) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # под пайпом Python буферизует stdout блоками, и прогресс появляется
+    # только в самом конце — на прогоне в десятки минут это выглядит как
+    # зависание. Построчный режим возвращает смысл всему прогресс-выводу.
+    sys.stdout.reconfigure(line_buffering=True)
     args = build_parser().parse_args(argv)
     try:
         COMMANDS[args.command](args)

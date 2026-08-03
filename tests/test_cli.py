@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import sys
+
 from kaidzen import __main__ as cli
 from kaidzen.benchmark import Benchmark
 from kaidzen.checkpoint import STATUS_APPROVED, CheckpointRecord
@@ -1017,3 +1019,13 @@ def test_evolve_fails_at_startup_when_meta_backend_key_is_missing(tmp_path,
 
     # Assert
     assert "KAIDZEN_META_KEY" in str(exc.value)
+
+
+def test_main_makes_stdout_line_buffered(monkeypatch, capsys):
+    """Под пайпом вывод копится в буфере, и получасовой прогон выглядит зависшим."""
+    calls = []
+    monkeypatch.setattr(sys.stdout, "reconfigure",
+                        lambda **kw: calls.append(kw), raising=False)
+    monkeypatch.setitem(cli.COMMANDS, "report", lambda args: None)
+    cli.main(["report", "любой"])
+    assert calls and calls[0].get("line_buffering") is True
