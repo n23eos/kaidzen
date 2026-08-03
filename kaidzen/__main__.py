@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from datetime import datetime
@@ -14,17 +13,16 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from kaidzen.candidate import Candidate, load_candidate
-from kaidzen.llm import LLMClient
+from kaidzen.backends.base import BackendError
+from kaidzen.backends.registry import build_backends
+from kaidzen.candidate import (REPORTER_ROLE, Candidate, backends_by_role,
+                               load_candidate)
 from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
                                   STEP_RESEARCHER, STEP_WARNING,
-                                  _loop_from_state, run_pipeline)
+                                  _loop_from_state, run_pipeline, total_usage)
 from kaidzen.report import build_report
-from kaidzen.state import ApiUsage, RunState, load_state, save_state
+from kaidzen.state import RunState, load_state, save_state
 
-# модель резюме берётся из config.yaml кандидата (ключ models.reporter):
-# имена моделей живут в конфиге, чтобы мета-цикл мог их развивать
-REPORTER_ROLE = "reporter"
 # пересказ готового текста без домысливания
 SUMMARY_EFFORT = "low"
 SUMMARY_SYSTEM = (
@@ -38,7 +36,6 @@ CHAMPION_PREFIX = "CHAMPION-"
 CANDIDATES_ROOT = Path("candidates")
 RUNS_ROOT = Path("runs")
 REPORT_FILENAME = "report.md"
-API_KEY_ENV = "ANTHROPIC_API_KEY"
 DOMAINS = ("generic", "business", "games")
 DEFAULT_DOMAIN = "generic"
 FALLBACK_SLUG = "idea"
@@ -129,6 +126,15 @@ def _print_start(run_dir: Path, candidate: Candidate,
     print(f"Кандидат: {candidate.candidate_id} "
           f"(домен {candidate.config.domain}, "
           f"до {limit} итераций)")
+    _print_roles(candidate)
+
+
+def _print_roles(candidate: Candidate) -> None:
+    """Кто на каком бэкенде: пользователь должен видеть, что идёт по подписке,
+    а не жжёт платный ключ. Ключи не печатаются — только имя бэкенда и модель.
+    """
+    for role, cfg in candidate.config.roles.items():
+        print(f"  {role}: {cfg.backend} / {cfg.model}")
 
 
 class ProgressPrinter:
@@ -206,11 +212,19 @@ def _print_finish(state: RunState, report_path: Path) -> None:
 
 # --- шаги команд -----------------------------------------------------------
 
-def _require_api_key() -> None:
-    """Ключ проверяем до любой работы, чтобы не падать после чтения файлов."""
-    if not os.environ.get(API_KEY_ENV):
-        sys.exit(f"Не задана переменная окружения {API_KEY_ENV}. "
-                 f"Экспортируйте ключ Anthropic API и повторите.")
+def _build_role_backends(candidate: Candidate) -> dict:
+    """Бэкенды ролей — один раз на старте, до первого платного вызова.
+
+    Ключи требуются только те, которые объявили бэкенды этого кандидата:
+    прогон целиком на подписке не требует ни одной переменной окружения.
+    Отсутствующий ключ — понятный выход, а не трейсбек на пятой минуте.
+    """
+    try:
+        built = build_backends(candidate.config.model_dump())
+    except BackendError as e:
+        sys.exit(f"Не удалось подготовить бэкенды кандидата "
+                 f"{candidate.candidate_id}: {e}")
+    return backends_by_role(candidate, built)
 
 
 def _read_idea(idea_path: Path) -> str:
@@ -219,12 +233,14 @@ def _read_idea(idea_path: Path) -> str:
     return idea_path.read_text(encoding="utf-8")
 
 
-def _generate_summary(llm, candidate: Candidate, state: RunState) -> str:
+def _generate_summary(backends: dict, candidate: Candidate,
+                      state: RunState) -> str:
     """Единственный вызов LLM вне цикла: короткое резюме финальной идеи."""
-    out = llm.structured(model=_reporter_model(candidate), system=SUMMARY_SYSTEM,
-                         user=state.current_idea_text(), schema=SummaryOutput,
-                         effort=SUMMARY_EFFORT)
-    state.api_usage = ApiUsage.model_validate(llm.usage, from_attributes=True)
+    out = backends[REPORTER_ROLE].structured(
+        model=_reporter_model(candidate), system=SUMMARY_SYSTEM,
+        user=state.current_idea_text(), schema=SummaryOutput,
+        effort=SUMMARY_EFFORT)
+    state.api_usage = total_usage(backends)
     return out.summary
 
 
@@ -236,28 +252,28 @@ def _write_report(state: RunState, run_dir: Path, summary_text: str) -> Path:
 
 
 def _reporter_model(candidate: Candidate) -> str:
-    """Модель для executive summary. Отсутствие ключа — ошибка конфига."""
-    model = candidate.config.models.get(REPORTER_ROLE)
-    if not model or not model.strip():
-        raise ValueError(
-            f"в config.yaml кандидата {candidate.candidate_id} не задана "
-            f"модель models.{REPORTER_ROLE} для executive summary")
-    return model
+    """Модель для executive summary.
+
+    Наличие роли reporter гарантирует валидация кандидата (candidate.py),
+    поэтому здесь проверки нет: она бы дублировала загрузчик конфига.
+    """
+    return candidate.config.roles[REPORTER_ROLE].model
 
 
-def _finish_run(llm, candidate: Candidate, state: RunState,
+def _finish_run(backends: dict, candidate: Candidate, state: RunState,
                 run_dir: Path) -> None:
     """Общий хвост run и resume: резюме, отчёт, итоговая сводка.
 
     Ход итераций пользователь уже видел вживую через ProgressPrinter — здесь
     печатается только финальная сводка, без повторного прохода по versions.
     """
-    summary = _safe_generate_summary(llm, candidate, state)
+    summary = _safe_generate_summary(backends, candidate, state)
     save_state(state, run_dir)  # расход на резюме тоже должен попасть в state
     _print_finish(state, _write_report(state, run_dir, summary))
 
 
-def _safe_generate_summary(llm, candidate: Candidate, state: RunState) -> str:
+def _safe_generate_summary(backends: dict, candidate: Candidate,
+                           state: RunState) -> str:
     """Резюме без риска потерять уже оплаченный прогон.
 
     _generate_summary — единственный вызов LLM без ретрая run_pipeline; цикл к
@@ -267,7 +283,7 @@ def _safe_generate_summary(llm, candidate: Candidate, state: RunState) -> str:
     и явно говорим об этом в stdout — отчёт всё равно пишется.
     """
     try:
-        return _generate_summary(llm, candidate, state)
+        return _generate_summary(backends, candidate, state)
     except Exception as e:
         print(f"Не удалось сгенерировать резюме ({e}); report.md записан без него.")
         return REBUILT_SUMMARY
@@ -276,7 +292,6 @@ def _safe_generate_summary(llm, candidate: Candidate, state: RunState) -> str:
 # --- команды ---------------------------------------------------------------
 
 def cmd_run(args: argparse.Namespace) -> None:
-    _require_api_key()
     idea_path = Path(args.idea)
     idea_text = _read_idea(idea_path)
     candidate_dir = (Path(args.candidate) if args.candidate
@@ -294,15 +309,15 @@ def cmd_run(args: argparse.Namespace) -> None:
                  f"чужой state.json.")
     run_dir.mkdir(parents=True, exist_ok=True)
     _print_start(run_dir, candidate)
-    llm = LLMClient()
-    state = run_pipeline(llm, candidate, idea_text=idea_text, run_dir=run_dir,
+    backends = _build_role_backends(candidate)
+    state = run_pipeline(backends, candidate, idea_text=idea_text,
+                         run_dir=run_dir,
                          candidate_dir=candidate_dir.resolve(),
                          on_step=ProgressPrinter())
-    _finish_run(llm, candidate, state, run_dir)
+    _finish_run(backends, candidate, state, run_dir)
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
-    _require_api_key()
     run_dir = Path(args.run_dir)
     saved = load_state(run_dir)
     if saved.stop_reason:
@@ -311,11 +326,11 @@ def cmd_resume(args: argparse.Namespace) -> None:
                  f"python -m kaidzen report {run_dir}")
     candidate = load_candidate(_resume_candidate_dir(saved))
     _print_start(run_dir, candidate, max_iterations=_loop_from_state(saved).max_iterations)
-    llm = LLMClient()
-    state = run_pipeline(llm, candidate, idea_text=saved.original_idea,
+    backends = _build_role_backends(candidate)
+    state = run_pipeline(backends, candidate, idea_text=saved.original_idea,
                          run_dir=run_dir, resume=True,
                          on_step=ProgressPrinter())
-    _finish_run(llm, candidate, state, run_dir)
+    _finish_run(backends, candidate, state, run_dir)
 
 
 def cmd_report(args: argparse.Namespace) -> None:

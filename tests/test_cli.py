@@ -10,14 +10,13 @@ import pytest
 from kaidzen import __main__ as cli
 from kaidzen.state import (ApiUsage, Assumption, JudgeResult, RunState, Version,
                            load_state)
+from tests.conftest import as_backends
 from tests.test_candidate import make_candidate
 
 
-class ExplodingLLM:
-    """Заглушка вместо LLMClient: падает при попытке создать клиента."""
-
-    def __init__(self, *args, **kwargs):
-        raise AssertionError("LLM-клиент не должен создаваться в этой команде")
+def explode(*args, **kwargs):
+    """Вместо сборки бэкендов: команда, которой они не нужны, не должна их строить."""
+    raise AssertionError("бэкенды не должны собираться в этой команде")
 
 
 def make_champion(root: Path, domain: str, candidate_name: str,
@@ -153,8 +152,9 @@ def test_parser_rejects_unknown_domain():
 
 def test_report_command_writes_report_without_llm(tmp_path, monkeypatch, capsys):
     # Arrange
-    monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "_build_role_backends", explode)
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
     run_dir = tmp_path / "2026-08-03-1215-idea"
     make_state_file(run_dir, stop_reason="plateau", iteration=2)
 
@@ -219,7 +219,7 @@ def test_resume_candidate_dir_fails_clearly_when_recorded_dir_missing(tmp_path):
 
 def test_resume_refuses_finished_run(tmp_path, monkeypatch):
     # Arrange
-    monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
+    monkeypatch.setattr(cli, "_build_role_backends", explode)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     run_dir = tmp_path / "2026-08-03-1215-idea"
     make_state_file(run_dir, stop_reason="max_iterations")
@@ -243,30 +243,54 @@ def test_resume_fails_clearly_without_state(tmp_path, monkeypatch):
     assert "state.json" in str(exc.value)
 
 
-def test_resume_requires_api_key(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_resume_of_old_shape_run_fails_clearly(tmp_path, monkeypatch):
+    """state.json прогона, начатого до сменных бэкендов, несёт секцию models:
+    продолжать такой прогон нечем — но сообщение должно быть внятным."""
+    monkeypatch.setattr(cli, "CANDIDATES_ROOT", Path("candidates"))
     run_dir = tmp_path / "2026-08-03-1215-idea"
-    make_state_file(run_dir)
+    make_state_file(run_dir, config={"loop": {"max_iterations": 6},
+                                     "models": {"analyzer": "claude-sonnet-5"}})
 
     with pytest.raises(SystemExit) as exc:
         cli.main(["resume", str(run_dir)])
 
-    assert "ANTHROPIC_API_KEY" in str(exc.value)
+    assert "report" in str(exc.value)
 
 
 # --- команда run -----------------------------------------------------------
 
-def test_run_requires_api_key(tmp_path, monkeypatch):
+def test_run_needs_no_key_for_subscription_backends(tmp_path, monkeypatch):
+    """Прогон целиком на подписке не требует ни одной переменной окружения:
+    сборка бэкендов поставляемого кандидата обязана пройти с пустым окружением."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    from kaidzen.candidate import load_candidate
+
+    backends = cli._build_role_backends(
+        load_candidate(Path("candidates") / "gen000-generic"))
+
+    assert set(backends) == {"analyzer", "researcher", "refiner", "judge",
+                             "reporter"}
+
+
+def test_run_fails_at_startup_when_declared_key_is_missing(tmp_path, monkeypatch,
+                                                           candidate):
+    """Требуем ровно те ключи, которые объявил кандидат, — и падаем на старте,
+    назвав переменную и бэкенд, а не на пятой минуте прогона."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)          # чтобы не подхватить .env репозитория
+    paid = with_backend(candidate, "deepseek", {"type": "openai_compat",
+                                                "api_key_env": "DEEPSEEK_API_KEY"})
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", str(tmp_path / "idea.md")])
+        cli._build_role_backends(paid)
 
-    assert "ANTHROPIC_API_KEY" in str(exc.value)
+    message = str(exc.value)
+    assert "DEEPSEEK_API_KEY" in message and "deepseek" in message
 
 
 def test_run_fails_clearly_when_idea_file_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
+    monkeypatch.setattr(cli, "_build_role_backends", explode)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     missing = tmp_path / "нет-такого.md"
 
@@ -280,7 +304,7 @@ def test_run_refuses_to_overwrite_existing_run_dir(tmp_path, monkeypatch):
     """Два прогона одной идеи в ту же секунду не должны затирать state.json
     друг друга: полностью оплаченный прогон нельзя потерять молча."""
     # Arrange
-    monkeypatch.setattr(cli, "LLMClient", ExplodingLLM)
+    monkeypatch.setattr(cli, "_build_role_backends", explode)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(cli, "RUNS_ROOT", tmp_path / "runs")
     idea_path = tmp_path / "idea.md"
@@ -329,9 +353,23 @@ class FakeSummaryLLM:
 
 
 def with_reporter(candidate, model: str = "reporter-model"):
-    """Кандидат с пятой моделью reporter — как в поставляемых config.yaml."""
-    models = {**candidate.config.models, cli.REPORTER_ROLE: model}
-    config = candidate.config.model_copy(update={"models": models})
+    """Кандидат с заданной моделью роли reporter (исходный не меняем)."""
+    from kaidzen.candidate import RoleConfig
+    roles = {**candidate.config.roles,
+             cli.REPORTER_ROLE: RoleConfig(backend="subscription", model=model)}
+    config = candidate.config.model_copy(update={"roles": roles})
+    return candidate.model_copy(update={"config": config})
+
+
+def with_backend(candidate, name: str, spec: dict, role: str = "judge"):
+    """Кандидат, у которого одна роль переехала на дополнительный бэкенд."""
+    from kaidzen.candidate import RoleConfig
+    backends = {**candidate.config.backends, name: spec}
+    roles = {**candidate.config.roles,
+             role: RoleConfig(backend=name,
+                              model=candidate.config.roles[role].model)}
+    config = candidate.config.model_copy(update={"backends": backends,
+                                                 "roles": roles})
     return candidate.model_copy(update={"config": config})
 
 
@@ -435,7 +473,7 @@ def test_finish_run_writes_report_with_summary_and_prints_usage(
     llm = FakeSummaryLLM("Короткое резюме идеи.")
 
     # Act
-    cli._finish_run(llm, with_reporter(candidate), state, run_dir)
+    cli._finish_run(as_backends(llm), with_reporter(candidate), state, run_dir)
 
     # Assert
     report = (run_dir / "report.md").read_text(encoding="utf-8")
@@ -468,7 +506,7 @@ def test_finish_run_writes_report_when_summary_call_fails(tmp_path, capsys, cand
     llm = FailingSummaryLLM()
 
     # Act
-    cli._finish_run(llm, with_reporter(candidate), state, run_dir)
+    cli._finish_run(as_backends(llm), with_reporter(candidate), state, run_dir)
 
     # Assert
     report_path = run_dir / "report.md"
@@ -487,7 +525,7 @@ def test_summary_model_comes_from_candidate_config(tmp_path, candidate):
     llm = FakeSummaryLLM("резюме")
 
     # Act
-    cli._finish_run(llm, with_reporter(candidate, "модель-репортёра"),
+    cli._finish_run(as_backends(llm), with_reporter(candidate, "модель-репортёра"),
                     make_finished_state(run_dir), run_dir)
 
     # Assert
@@ -503,7 +541,7 @@ def test_summary_call_sends_effort_and_no_temperature(tmp_path, candidate):
     run_dir.mkdir()
     llm = FakeSummaryLLM("резюме")
 
-    cli._finish_run(llm, with_reporter(candidate), make_finished_state(run_dir),
+    cli._finish_run(as_backends(llm), with_reporter(candidate), make_finished_state(run_dir),
                     run_dir)
 
     call = llm.calls[0]
@@ -512,10 +550,13 @@ def test_summary_call_sends_effort_and_no_temperature(tmp_path, candidate):
 
 
 @pytest.mark.parametrize("domain", ["generic", "business", "games"])
-def test_shipped_candidates_declare_reporter_model(domain):
+def test_shipped_candidates_run_everything_on_subscription(domain):
+    """Из коробки проект работает без единого ключа — все роли на подписке."""
     from kaidzen.candidate import load_candidate
     candidate = load_candidate(Path("candidates") / f"gen000-{domain}")
-    assert candidate.config.models[cli.REPORTER_ROLE].strip()
+    assert candidate.config.roles[cli.REPORTER_ROLE].model.strip()
+    assert {cfg.backend for cfg in candidate.config.roles.values()} == {
+        "subscription"}
 
 
 def test_print_start_shows_run_and_candidate(candidate, capsys):
@@ -524,6 +565,15 @@ def test_print_start_shows_run_and_candidate(candidate, capsys):
     out = capsys.readouterr().out
     assert "2026-08-03-1215-idea" in out
     assert candidate.candidate_id in out
+
+
+def test_print_start_names_backend_of_every_role(candidate, capsys):
+    """Пользователь должен видеть, что цикл идёт по подписке, а не по ключу."""
+    cli._print_start(Path("runs/2026-08-03-1215-idea"), candidate)
+
+    out = capsys.readouterr().out
+    for role, cfg in candidate.config.roles.items():
+        assert f"{role}: {cfg.backend} / {cfg.model}" in out
 
 
 def test_print_start_accepts_max_iterations_override(candidate, capsys):
