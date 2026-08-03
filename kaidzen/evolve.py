@@ -62,6 +62,9 @@ EVAL_MAX_ITERATIONS = 4
 RUN_STAMP_LENGTH = 6      # метка прогона в имени потомка: хвост времени из evolve_id
 # столько упавших прогонов — и кандидат считается нестабильным
 FAILURE_LIMIT = 2
+# меньше этого числа сравнимых идей — результат попарок ничего не значит,
+# и об этом нужно сказать вслух: «побед 0 из 1» выглядит как полноценный итог
+MIN_COMPARABLE_IDEAS = 2
 
 STATE_FILE = "state.json"
 SUMMARY_FILE = "summary.md"
@@ -375,7 +378,9 @@ def _diagnose(ctx: EvolveContext, state: EvolveState,
     record = gen.champion or CandidateRecord(candidate_id=state.champion_id,
                                              candidate_dir=state.champion_dir)
     gen.champion = record
-    _evaluate_candidate(ctx, state, record, ctx.benchmark.train)
+    # чемпион идёт по всем идеям без досрочной отбраковки: он база сравнения
+    _evaluate_candidate(ctx, state, record, ctx.benchmark.train,
+                        stop_on_failures=False)
     reports = _reports_of(record)
     if not reports:
         raise ValueError(
@@ -445,7 +450,12 @@ def _compare(ctx: EvolveContext, state: EvolveState,
         wins = sum(1 for champion, challenger in pairs
                    if _challenger_wins(ctx, champion, challenger))
         record.win_rate = wins / len(pairs) if pairs else 0.0
-        _event(ctx, f"{record.candidate_id}: побед {wins} из {len(pairs)}")
+        total = len(ctx.benchmark.train)
+        note = (f"{record.candidate_id}: побед {wins} из {len(pairs)} "
+                f"(сравнимых идей {len(pairs)} из {total})")
+        if len(pairs) < MIN_COMPARABLE_IDEAS:
+            note += " — выборка слишком мала, результату верить нельзя"
+        _event(ctx, note)
         _save(ctx, state)
     _advance(ctx, state, gen, STAGE_COMPARED)
 
@@ -549,8 +559,15 @@ def _cache_key(candidate_id: str, idea: Path) -> str:
 
 def _evaluate_candidate(ctx: EvolveContext, state: EvolveState,
                         record: CandidateRecord, ideas: list[Path], *,
-                        is_train: bool = True) -> None:
-    """Прогоняет кандидата по идеям: готовое берёт из кэша, остальное — пулом."""
+                        is_train: bool = True,
+                        stop_on_failures: bool = True) -> None:
+    """Прогоняет кандидата по идеям: готовое берёт из кэша, остальное — пулом.
+
+    stop_on_failures=False — для чемпиона: он база сравнения, а не кандидат на
+    оценку. Оборвав его прогоны, мы сужаем пересечение с челленджерами, и
+    сравнивать становится не на чем. Поймано на полном бенчмарке: два падения
+    чемпиона схлопнули пять идей до одного сравнения.
+    """
     done = {run.idea for run in record.runs}
     pending = []
     for idea in ideas:
@@ -563,12 +580,14 @@ def _evaluate_candidate(ctx: EvolveContext, state: EvolveState,
             pending.append(idea)
     _save(ctx, state)
     if pending:
-        _run_pool(ctx, state, record, pending)
-    _finish_candidate(ctx, state, record, is_train=is_train)
+        _run_pool(ctx, state, record, pending,
+                  stop_on_failures=stop_on_failures)
+    _finish_candidate(ctx, state, record, is_train=is_train,
+                      mark_unstable=stop_on_failures)
 
 
 def _run_pool(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
-              ideas: list[Path]) -> None:
+              ideas: list[Path], *, stop_on_failures: bool = True) -> None:
     """Пул прогонов. Состояние трогает только главный поток — по мере готовности.
 
     Рабочие потоки возвращают готовый EvalRun и ничего не сохраняют: иначе
@@ -584,7 +603,7 @@ def _run_pool(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
             _event(ctx, f"{record.candidate_id} / {Path(run.idea).name}: "
                         f"{'готово' if run.ok else 'ошибка ' + run.error}")
             _save(ctx, state)
-            if _failures(record) >= FAILURE_LIMIT:
+            if stop_on_failures and _failures(record) >= FAILURE_LIMIT:
                 for rest in futures:
                     rest.cancel()   # уже начатые дойдут сами, новые не стартуют
                 break
@@ -620,7 +639,8 @@ def _failures(record: CandidateRecord) -> int:
 
 
 def _finish_candidate(ctx: EvolveContext, state: EvolveState,
-                      record: CandidateRecord, *, is_train: bool) -> None:
+                      record: CandidateRecord, *, is_train: bool,
+                      mark_unstable: bool = True) -> None:
     """Итог кандидата: агрегированные метрики и статус.
 
     Два упавших прогона — это нестабильный кандидат, а не досадная случайность:
@@ -628,8 +648,8 @@ def _finish_candidate(ctx: EvolveContext, state: EvolveState,
     """
     record.metrics = aggregate([run.metrics for run in record.runs
                                 if run.ok and run.metrics is not None])
-    record.status = (STATUS_UNSTABLE if _failures(record) >= FAILURE_LIMIT
-                     else STATUS_EVALUATED)
+    unstable = mark_unstable and _failures(record) >= FAILURE_LIMIT
+    record.status = STATUS_UNSTABLE if unstable else STATUS_EVALUATED
     if is_train:
         # holdout-метрики сюда попасть не должны: на чекпоинте именно их
         # сравнивают с train-метриками, и совпадение обессмыслило бы проверку

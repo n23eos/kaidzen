@@ -21,10 +21,13 @@ from kaidzen.backends.json_extract import (JsonExtractionError,
 T = TypeVar("T", bound=BaseModel)
 
 WEB_SEARCH_TOOL = "WebSearch"
-# max_turns=1 SDK трактует как «ход исчерпан» и падает с ошибкой ещё до ответа —
-# поймано на живом прогоне. Запас нужен даже там, где инструментов нет.
-TURNS_WITHOUT_SEARCH = 4
-TURNS_WITH_SEARCH = 12
+# Потолки, а не бюджеты: SDK тратит столько ходов, сколько нужно, и неизрасходованные
+# ничего не стоят. Скупость здесь обходится дорого — на полном бенчмарке лимиты 4/12
+# уронили почти треть прогонов ('Reached maximum number of turns'), а каждое падение
+# выбивает идею из сравнения кандидатов. Researcher делает до трёх поисков на допущение
+# при пяти допущениях за итерацию, то есть полтора десятка ходов только на запросы.
+TURNS_WITHOUT_SEARCH = 12
+TURNS_WITH_SEARCH = 40
 
 JSON_INSTRUCTION = (
     "Верни СТРОГО один JSON-объект по схеме ниже. Без markdown-ограды, "

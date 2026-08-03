@@ -351,3 +351,57 @@ def test_candidate_id_is_stable_within_one_run():
 
 def test_candidate_id_survives_evolve_id_without_digits():
     assert evolve._candidate_id(1, 0, "прогон") .startswith("gen001-a")
+
+
+# --- база сравнения не должна усыхать (поймано на полном бенчмарке) ---------
+
+def test_champion_is_evaluated_on_every_idea_despite_failures(tmp_path):
+    """Чемпион — база сравнения, а не кандидат на оценку.
+
+    Обрыв его прогонов по FAILURE_LIMIT сузил пересечение с челленджерами до
+    одной идеи: бенчмарк из пяти выродился в выборку размером с прошлый прогон.
+    """
+    env = make_env(tmp_path)
+    pipeline = FakePipeline(fails={CHAMPION_ID})
+    ctx = make_ctx(env, FakeMeta(comparison="champion"), pipeline)
+    with pytest.raises(ValueError, match="эволюционировать"):
+        run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    champion_ideas = {idea for cid, idea in pipeline.calls if cid == CHAMPION_ID}
+    assert len(champion_ideas) == len(env.benchmark.train), (
+        "чемпион обязан пройти все train-идеи, иначе сравнивать не с чем")
+
+
+def test_challenger_still_stops_after_two_failures(tmp_path):
+    """Для челленджера отбраковка по нестабильности остаётся."""
+    env = make_env(tmp_path)
+    pipeline = FakePipeline(fails={"gen001-a"})
+    ctx = make_ctx(env, FakeMeta(), pipeline)
+    state = run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    broken = next(c for c in state.generations[-1].challengers
+                  if c.candidate_id.startswith("gen001-a"))
+    assert broken.status == STATUS_UNSTABLE
+
+
+def test_compare_reports_how_many_ideas_were_comparable(tmp_path):
+    """«побед 0 из 1» при бенчмарке из пяти идей выглядит нормально и молчит
+    о том, что выборка схлопнулась. Доля сравнимых идей должна быть в строке."""
+    env = make_env(tmp_path)
+    events: list[str] = []
+    ctx = make_ctx(env, FakeMeta(), FakePipeline(), on_event=events.append)
+    run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    lines = [e for e in events if "побед" in e]
+    assert lines
+    total = len(env.benchmark.train)
+    for line in lines:
+        assert f"сравнимых идей {total} из {total}" in line, line
+
+
+def test_compare_warns_when_comparison_set_is_too_thin(tmp_path):
+    """Мало сравнимых идей — предупреждение, а не молчаливый результат."""
+    env = make_env(tmp_path)
+    # чемпион падает на всех идеях кроме одной: сравнивать будет нечего
+    pipeline = FakePipeline(fails=set())
+    events: list[str] = []
+    ctx = make_ctx(env, FakeMeta(), pipeline, on_event=events.append)
+    run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    assert evolve.MIN_COMPARABLE_IDEAS >= 2

@@ -158,8 +158,9 @@ def make_env(tmp_path: Path):
 
 
 def make_ctx(env, meta: FakeMeta, pipeline: FakePipeline,
-             concurrency: int = 1) -> EvolveContext:
+             concurrency: int = 1, on_event=None) -> EvolveContext:
     return EvolveContext(evolve_dir=env.evolve_dir,
                          candidates_root=env.candidates_root,
                          benchmark=env.benchmark, meta_backend=meta,
-                         pipeline=pipeline, concurrency=concurrency)
+                         pipeline=pipeline, concurrency=concurrency,
+                         on_event=on_event)
