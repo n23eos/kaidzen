@@ -10,6 +10,9 @@ from pydantic import (BaseModel, ConfigDict, Field, field_validator,
 from kaidzen.backends.registry import KNOWN_TYPES, supports_web_search
 
 ROLES = ("analyzer", "researcher", "refiner", "judge")
+# файл-указатель на кандидата-чемпиона домена: candidates/CHAMPION-<domain>.
+# Живёт здесь, а не в CLI: указатель читает run, а пишет Gate мета-лупа.
+CHAMPION_PREFIX = "CHAMPION-"
 # отдельно от ROLES: reporter не имеет своего файла промпта (см. load_candidate),
 # но бэкенд и модель для него обязаны быть заданы — иначе executive summary
 # падает только в самом конце оплаченного прогона (__main__._generate_summary)

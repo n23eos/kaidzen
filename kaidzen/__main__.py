@@ -15,8 +15,8 @@ from pydantic import BaseModel
 
 from kaidzen.backends.base import BackendError
 from kaidzen.backends.registry import build_backends
-from kaidzen.candidate import (REPORTER_ROLE, Candidate, backends_by_role,
-                               load_candidate)
+from kaidzen.candidate import (CHAMPION_PREFIX, REPORTER_ROLE, Candidate,
+                               backends_by_role, load_candidate)
 from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
                                   STEP_RESEARCHER, STEP_WARNING,
                                   _loop_from_state, run_pipeline, total_usage)
@@ -32,7 +32,6 @@ SUMMARY_SYSTEM = (
 )
 
 RUN_DIR_TIMESTAMP_FORMAT = "%Y-%m-%d-%H%M%S"
-CHAMPION_PREFIX = "CHAMPION-"
 CANDIDATES_ROOT = Path("candidates")
 RUNS_ROOT = Path("runs")
 REPORT_FILENAME = "report.md"

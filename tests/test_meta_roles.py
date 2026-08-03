@@ -160,3 +160,11 @@ def test_patch_touching_three_roles_is_rejected():
 def test_patch_touching_two_roles_is_allowed():
     patch = to_patch(MutationProposal(prompts={"analyzer": "a", "judge": "b"}))
     assert set(patch.prompts) == {"analyzer", "judge"}
+
+
+def test_meta_backend_is_built_from_the_config():
+    """Подписочный бэкенд собирается без ключей — мета-прогон стартует всегда."""
+    from kaidzen.backends.claude_agent import ClaudeAgentBackend
+    from kaidzen.roles.meta import build_meta_backend
+
+    assert isinstance(build_meta_backend(MetaConfig()), ClaudeAgentBackend)

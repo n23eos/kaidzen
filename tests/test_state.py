@@ -153,10 +153,11 @@ def test_save_fsyncs_data_and_directory(tmp_path: Path, monkeypatch):
     assert dir_fds and dir_fds[0] in synced
 
 
-def test_save_removes_temp_file_when_serialization_fails(tmp_path: Path, monkeypatch):
+def test_save_removes_temp_file_when_write_fails(tmp_path: Path, monkeypatch):
+    """Упавшая запись не должна оставлять обломок рядом с настоящим state.json."""
     s = RunState(run_id="r1", candidate_id="c", config={}, original_idea="i")
-    monkeypatch.setattr(type(s), "model_dump_json",
-                        lambda self, **kw: (_ for _ in ()).throw(RuntimeError("бум")))
+    monkeypatch.setattr(os, "replace",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("бум")))
     with pytest.raises(RuntimeError):
         save_state(s, tmp_path)
     assert not list(tmp_path.glob("*.tmp"))

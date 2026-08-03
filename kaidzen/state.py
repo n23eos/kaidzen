@@ -130,25 +130,33 @@ class RunState(BaseModel):
 
 
 def save_state(state: RunState, run_dir: Path) -> None:
+    """Состояние прогона на диск. Атомарность — в write_atomically."""
+    write_atomically(run_dir / "state.json", state.model_dump_json(indent=2))
+
+
+def write_atomically(path: Path, text: str) -> None:
     """Атомарно и с защитой от потери питания: fsync данных, rename, fsync каталога.
 
     Без fsync файла rename может лечь на диск раньше самих данных — после
     отключения питания останется обрезанный state.json, а именно на него
-    опирается возобновление прогона.
+    опирается возобновление прогона. Тем же путём пишется состояние
+    evolve-прогона (kaidzen/evolve.py): у него ровно та же цена потери.
     """
-    run_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=run_dir, prefix="state.", suffix=".tmp")
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=f"{path.name}.",
+                                    suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(state.model_dump_json(indent=2))
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, run_dir / "state.json")
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    _fsync_dir(run_dir)
+    _fsync_dir(directory)
 
 
 def _fsync_dir(path: Path) -> None:
