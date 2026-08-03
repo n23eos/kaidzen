@@ -17,3 +17,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["kaidzen*"]
+
+[tool.setuptools.package-data]
+# промпты мета-уровня — часть кода, а не данные кандидата: без них
+# установленный пакет не сможет запустить мета-роли
+kaidzen = ["prompts/**/*.md"]
