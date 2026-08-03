@@ -25,10 +25,12 @@
 |---|---|---|---|---|
 | `subscription` | `claude_agent_sdk` | не нужен (подписка) | да, tool `WebSearch` | JSON по схеме в промпте + валидация |
 | `anthropic` | `anthropic` | `ANTHROPIC_API_KEY` | да, `web_search_20260209` | tool-use `submit` со схемой |
-| `openai` | `openai_compat` | `OPENAI_API_KEY` | да, Responses API | `response_format: json_schema, strict` |
+| `openai` | `openai_compat` | `OPENAI_API_KEY` | **нет** (см. ниже) | `response_format: json_schema, strict` |
 | `deepseek` | `openai_compat` | `DEEPSEEK_API_KEY` | **нет** | `response_format: json_object` + схема в промпте |
 
 Каждый бэкенд объявляет способности; загрузчик конфига читает их и валидирует расстановку ролей.
+
+**Веб-поиск у OpenAI не реализован.** Responses API его умеет, но плумбинг не написан, поэтому флаг у бэкенда выставлен в `false` — заявлять способность, которой нет, нельзя: на этот флаг опирается проверка §3.3, решающая, можно ли ставить туда Researcher. Итог: искать умеют `subscription` и `anthropic`; `openai` и `deepseek` годятся только для Analyzer, Refiner, Judge и Reporter. Включение поиска у OpenAI — отдельная задача, и флаг переключается только вместе с реализацией.
 
 ---
 
