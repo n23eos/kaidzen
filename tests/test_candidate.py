@@ -237,9 +237,10 @@ def test_shipped_candidate_rubric(shipped):
 
 @pytest.mark.parametrize("domain", SHIPPED_DOMAINS)
 def test_champion_file_points_at_loadable_candidate(domain):
+    """Указатель обязан вести на загружаемого кандидата — но не обязательно
+    на исходного: смена чемпиона эволюцией это и есть работа мета-лупа."""
     champ = (REPO_CANDIDATES / f"CHAMPION-{domain}").read_text(
         encoding="utf-8").strip()
-    assert champ == f"gen000-{domain}"
     assert load_candidate(REPO_CANDIDATES / champ).candidate_id == champ
 
 

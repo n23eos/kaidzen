@@ -12,6 +12,7 @@ from kaidzen.metrics import RunMetrics
 
 MIN_WIN_RATE = 0.55          # доля побед в попарках
 MAX_REGRESSION = 0.10        # относительное проседание метрики, которое терпим
+MAX_REGISTRY_SHRINK = 0.20   # насколько можно ужать реестр допущений «бесплатно»
 
 
 class GateDecision(BaseModel):
@@ -41,10 +42,33 @@ def _source_rate(m: RunMetrics) -> float:
     return m.facts_with_sources / m.facts_total if m.facts_total else 0.0
 
 
+def _gamed_the_denominator(champion: RunMetrics, challenger: RunMetrics) -> bool:
+    """Доля выросла за счёт ужатого реестра, а не за счёт закрытых вопросов.
+
+    Поймано на первом живом поколении: чемпион закрывал 4 допущения из 6,
+    челленджер — 4 из 4. Доля скакнула с 0.67 до 1.00, хотя закрыто ровно
+    столько же. Знаменатель задаёт Analyzer, то есть система сама, поэтому
+    доля закрытых без абсолютного числа — метрика, которую можно нарисовать.
+
+    Ужимать реестр не запрещено: короткий список по делу лучше длинного из
+    домыслов. Но тогда закрытых должно стать больше в штуках, иначе
+    улучшения не произошло.
+    """
+    if champion.high_total <= 0:
+        return False
+    shrink = (champion.high_total - challenger.high_total) / champion.high_total
+    if shrink <= MAX_REGISTRY_SHRINK:
+        return False
+    return challenger.high_closed <= champion.high_closed
+
+
 def _broken_metrics(champion: RunMetrics, challenger: RunMetrics) -> list[str]:
     checks = [
         ("assumptions_closed_rate", _regressed(champion.assumptions_closed_rate,
                                                challenger.assumptions_closed_rate)),
+        ("high_closed", challenger.high_closed < champion.high_closed),
+        ("реестр ужат без роста числа закрытых",
+         _gamed_the_denominator(champion, challenger)),
         ("grounded_changelog_rate", _regressed(champion.grounded_changelog_rate,
                                                challenger.grounded_changelog_rate)),
         ("source_rate", _regressed(_source_rate(champion),
