@@ -12,6 +12,14 @@ from kaidzen.state import Assumption, Fact, RunState, Version
 # дальше идут технические детали, не нужные для обзора истории
 MAX_CHANGELOG_ENTRIES_IN_EVOLUTION = 2
 
+# закрытым считается допущение, доведённое до вердикта; `partial` — не закрыто,
+# ровно как в orchestrator.CLOSED_STATUSES: расхождение здесь означало бы, что
+# отчёт рапортует о проверке, которой цикл не признал
+CLOSED_STATUSES = frozenset({"confirmed", "refuted", "untestable"})
+
+# заголовок раздела с полными фактами; на него ссылается ячейка таблицы
+FACTS_SECTION = "Факты и источники"
+
 DASH = "-"
 
 
@@ -25,10 +33,16 @@ def _render_fact(fact: Fact) -> str:
     return f"[{link_text}]({fact.source_url}): {fact.claim}"
 
 
-def _render_facts_cell(facts: list[Fact]) -> str:
+def _render_facts_cell(facts: list[Fact], anchor: str) -> str:
+    """В таблице — только счётчик и отсылка вниз.
+
+    Разворачивать все факты прямо в ячейке нельзя: на реальном прогоне одно
+    допущение набирает шесть фактов, и строка таблицы раздувается до нескольких
+    тысяч символов, после чего таблицу невозможно читать.
+    """
     if not facts:
         return DASH
-    return "; ".join(_render_fact(f) for f in facts)
+    return f"{len(facts)} — см. «{anchor}»"
 
 
 def _scored_versions(state: RunState) -> list[Version]:
@@ -72,20 +86,34 @@ def _render_rubric(state: RunState) -> str:
     first, final = scored[0], scored[-1]
     axes = sorted(first.judge.scores.keys() | final.judge.scores.keys())
 
+    def cell(version: Version, axis: str) -> str:
+        score = version.judge.scores.get(axis)
+        return f"{score:.1f}" if score is not None else DASH
+
+    # одна оценённая версия — одна колонка: «v1 | v1» повторяет само себя
+    # и создаёт видимость динамики там, где сравнивать ещё не с чем
+    if first is final:
+        lines.append(f"| Ось | v{first.n} |")
+        lines.append("| --- | --- |")
+        for axis in axes:
+            lines.append(f"| {_escape_cell(axis)} | {cell(first, axis)} |")
+        lines.append(f"| total | {first.judge.total:.1f} |")
+        return "\n".join(lines)
+
     lines.append(f"| Ось | v{first.n} | v{final.n} |")
     lines.append("| --- | --- | --- |")
     for axis in axes:
-        first_score = first.judge.scores.get(axis)
-        final_score = final.judge.scores.get(axis)
-        first_cell = f"{first_score:.1f}" if first_score is not None else DASH
-        final_cell = f"{final_score:.1f}" if final_score is not None else DASH
-        lines.append(f"| {_escape_cell(axis)} | {first_cell} | {final_cell} |")
+        lines.append(f"| {_escape_cell(axis)} | {cell(first, axis)} | {cell(final, axis)} |")
     lines.append(f"| total | {first.judge.total:.1f} | {final.judge.total:.1f} |")
     return "\n".join(lines)
 
 
 def _unverified(state: RunState) -> list[Assumption]:
     return [a for a in state.assumptions if a.status == "unverified"]
+
+
+def _partial(state: RunState) -> list[Assumption]:
+    return [a for a in state.assumptions if a.status == "partial"]
 
 
 def _assumptions_summary(state: RunState) -> str:
@@ -97,12 +125,18 @@ def _assumptions_summary(state: RunState) -> str:
     total = len(state.assumptions)
     if not total:
         return "Реестр допущений пуст."
+    closed = sum(1 for a in state.assumptions if a.status in CLOSED_STATUSES)
     open_count = len(_unverified(state))
-    if open_count == total:
+    partial_count = len(_partial(state))
+    if not closed:
         return ("**Ни одно допущение не проверено: прогон не закрыл фактами "
                 f"ни одного из {total}.**")
-    return (f"Закрыто {total - open_count} из {total} допущений; "
-            f"осталось непроверенных: {open_count}.")
+    tail = f"осталось непроверенных: {open_count}"
+    if partial_count:
+        # частично подтверждённое не закрыто и не «не тронуто» — своя корзина,
+        # иначе отчёт молча зачтёт его в одну из крайностей
+        tail += f", подтверждено частично: {partial_count}"
+    return f"Закрыто {closed} из {total} допущений; {tail}."
 
 
 def _render_assumptions(state: RunState) -> str:
@@ -118,9 +152,29 @@ def _render_assumptions(state: RunState) -> str:
         lines.append(
             f"| {_escape_cell(a.id)} | {_escape_cell(a.text)} | "
             f"{a.criticality} | {a.status} | "
-            f"{_escape_cell(_render_facts_cell(a.facts))} |"
+            f"{_escape_cell(_render_facts_cell(a.facts, FACTS_SECTION))} |"
         )
     return "\n".join(lines)
+
+
+def _render_facts_section(state: RunState) -> str:
+    """Полные факты со ссылками, вынесенные из таблицы.
+
+    Каждый факт остаётся проверяемым — таблица выше только отсылает сюда.
+    """
+    lines = [f"## {FACTS_SECTION}", ""]
+    with_facts = [a for a in state.assumptions if a.facts]
+    if not with_facts:
+        lines.append("Фактов не собрано.")
+        return "\n".join(lines)
+    for a in with_facts:
+        lines.append(f"**{a.id} — {a.status}:** {a.text}")
+        lines.append("")
+        for fact in a.facts:
+            dated = f" ({fact.date})" if fact.date else ""
+            lines.append(f"- {_render_fact(fact)}{dated}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _render_changelog_entry(entry) -> str:
@@ -153,24 +207,29 @@ def _render_next_steps(state: RunState) -> str:
         return "\n".join(lines)
 
     unverified = _unverified(state)
+    partial = _partial(state)
     untestable = [a for a in state.assumptions if a.status == "untestable"]
-    if not unverified and not untestable:
+    if not unverified and not partial and not untestable:
         lines.append(
             "Все допущения проверены по источникам — экспериментов в реальном мире не требуется."
         )
         return "\n".join(lines)
 
-    if unverified:
-        lines.append("Эти допущения остались непроверенными — прогон не закрыл "
-                     "их фактами:")
-        lines.append("")
-        lines.extend(f"- [{a.id}] {a.text}" for a in unverified)
-        if untestable:
+    blocks = [
+        (unverified, "Эти допущения остались непроверенными — прогон не закрыл "
+                     "их фактами:"),
+        (partial, "Эти допущения подтверждены лишь частично — данные нашлись по "
+                  "другому сегменту, региону или периоду:"),
+        (untestable, "Эти допущения можно проверить только реальным экспериментом:"),
+    ]
+    for items, title in blocks:
+        if not items:
+            continue
+        if len(lines) > 2:
             lines.append("")
-    if untestable:
-        lines.append("Эти допущения можно проверить только реальным экспериментом:")
+        lines.append(title)
         lines.append("")
-        lines.extend(f"- [{a.id}] {a.text}" for a in untestable)
+        lines.extend(f"- [{a.id}] {a.text}" for a in items)
     return "\n".join(lines)
 
 
@@ -184,6 +243,7 @@ def build_report(state: RunState, *, summary_text: str = "") -> str:
         _render_final_idea(state),
         _render_rubric(state),
         _render_assumptions(state),
+        _render_facts_section(state),
         _render_evolution(state),
         _render_next_steps(state),
     ]

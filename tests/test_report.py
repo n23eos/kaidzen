@@ -251,3 +251,61 @@ def test_missing_summary_text_defaults_to_empty_and_no_crash():
     state = _full_state()
     report = build_report(state)  # без summary_text
     assert isinstance(report, str) and len(report) > 0
+
+
+# --- дефекты, найденные на smoke-прогоне -----------------------------------
+
+def _state_with_statuses(*statuses):
+    """Реестр из допущений с заданными статусами, по одному на статус."""
+    return RunState(
+        run_id="r", candidate_id="c", config={}, original_idea="raw",
+        assumptions=[
+            Assumption(id=f"A{i}", text=f"допущение {i}", criticality="high",
+                       status=status)
+            for i, status in enumerate(statuses, start=1)
+        ])
+
+
+def test_partial_does_not_count_as_closed():
+    """`partial` — не закрытое допущение: оркестратор его таковым не считает."""
+    md = build_report(_state_with_statuses("confirmed", "partial", "unverified"),
+                      summary_text="s")
+    assert "Закрыто 1 из 3" in md
+
+
+def test_partial_counted_among_open():
+    md = build_report(_state_with_statuses("confirmed", "partial"), summary_text="s")
+    assert "Закрыто 1 из 2" in md
+    assert "подтверждено частично: 1" in md
+    # частичное подтверждение не даёт права заявить, что всё проверено
+    assert "Все допущения проверены" not in md
+    assert "подтверждены лишь частично" in md
+
+
+def test_single_scored_version_renders_one_score_column():
+    """Одна оценённая версия — одна колонка, а не 'v1 | v1'."""
+    s = RunState(
+        run_id="r", candidate_id="c", config={}, original_idea="raw",
+        versions=[Version(n=1, idea_text="v1", judge=JudgeResult(
+            scores={"clarity": 6.0}, total=6.0, delta_vs_previous=0.0,
+            critique=[], verdict="continue"))])
+    md = build_report(s, summary_text="s")
+    rubric = md.split("## Оценки по рубрике")[1].split("##")[0]
+    assert "| Ось | v1 |" in rubric
+    assert "v1 | v1" not in rubric
+
+
+def test_many_facts_are_summarised_in_table_cell():
+    """Ячейка с фактами не должна раздувать таблицу до нечитаемости."""
+    facts = [Fact(claim=f"факт {i}", source_url=f"https://src/{i}",
+                  source_title=f"Источник {i}") for i in range(6)]
+    s = RunState(
+        run_id="r", candidate_id="c", config={}, original_idea="raw",
+        assumptions=[Assumption(id="A1", text="t", criticality="high",
+                                status="refuted", facts=facts)])
+    md = build_report(s, summary_text="s")
+    table_row = [ln for ln in md.splitlines() if ln.startswith("| A1 ")][0]
+    assert len(table_row) < 400, f"строка таблицы раздута: {len(table_row)} символов"
+    assert "6" in table_row  # число фактов названо
+    # полные факты со ссылками никуда не делись — они ниже таблицы
+    assert "https://src/5" in md
