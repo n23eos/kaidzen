@@ -5,6 +5,9 @@
 правок, пометка «этот был раньше» — превратил бы оценку результата в оценку
 намерения, а весь смысл мета-лупа в том, чтобы ловить правки, которые звучат
 убедительно и измеряются хуже.
+
+Второй параметр — `MetaConfig`, то есть транспорт и имя модели самого судьи.
+О сравниваемых кандидатах он не знает ничего, поэтому слепоту не нарушает.
 """
 from __future__ import annotations
 
@@ -12,8 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from kaidzen.candidate import Candidate
-from kaidzen.roles.meta import load_meta_prompt, meta_model
+from kaidzen.roles.meta import MetaConfig, load_meta_prompt
 
 # сравнение по фиксированным критериям должно быть воспроизводимым
 EFFORT = "low"
@@ -25,13 +27,13 @@ class Comparison(BaseModel):
     reason: str
 
 
-def run_meta_judge(backend, candidate: Candidate, *, report_a: str,
+def run_meta_judge(backend, meta: MetaConfig, *, report_a: str,
                    report_b: str) -> Comparison:
     user = (f"ОТЧЁТ A:\n\n{report_a}\n\n"
             f"---\n\n"
             f"ОТЧЁТ B:\n\n{report_b}\n\n"
             f"---\n\n"
             f"Какой отчёт лучше по существу? Допустим ответ «ничья» (tie).")
-    return backend.structured(model=meta_model(candidate),
+    return backend.structured(model=meta.judge_model,
                               system=load_meta_prompt(PROMPT_NAME), user=user,
                               schema=Comparison, effort=EFFORT)

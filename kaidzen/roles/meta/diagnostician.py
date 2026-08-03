@@ -5,9 +5,8 @@ import json
 
 from pydantic import BaseModel
 
-from kaidzen.candidate import Candidate
 from kaidzen.metrics import RunMetrics
-from kaidzen.roles.meta import load_meta_prompt, meta_model
+from kaidzen.roles.meta import MetaConfig, load_meta_prompt
 
 # поиск причины по числам и текстам — задача на рассуждение, не на пересказ
 EFFORT = "high"
@@ -20,7 +19,7 @@ class Diagnosis(BaseModel):
     hypotheses: list[str]
 
 
-def run_diagnostician(backend, candidate: Candidate, *, metrics: RunMetrics,
+def run_diagnostician(backend, meta: MetaConfig, *, metrics: RunMetrics,
                       reports: list[str]) -> Diagnosis:
     """Метрики идут числами, отчёты — целиком: гипотеза обязана опираться на оба."""
     numbers = json.dumps(metrics.model_dump(), ensure_ascii=False,
@@ -32,6 +31,6 @@ def run_diagnostician(backend, candidate: Candidate, *, metrics: RunMetrics,
             f"Назови слабые места и 2–3 гипотезы улучшения. "
             f"Каждая гипотеза — одна роль, одно конкретное изменение, "
             f"одна метрика в обоснование.")
-    return backend.structured(model=meta_model(candidate),
+    return backend.structured(model=meta.deep_model,
                               system=load_meta_prompt(PROMPT_NAME), user=user,
                               schema=Diagnosis, effort=EFFORT)

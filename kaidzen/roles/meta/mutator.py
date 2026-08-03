@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from kaidzen.candidate import Candidate
 from kaidzen.mutation import CandidatePatch
-from kaidzen.roles.meta import load_meta_prompt, meta_model
+from kaidzen.roles.meta import MetaConfig, load_meta_prompt
 from kaidzen.roles.meta.diagnostician import Diagnosis
 
 # правка чужого промпта требует понимания, зачем там каждая фраза
@@ -17,6 +17,12 @@ PROMPT_NAME = "mutator"
 JSON_INDENT = 2
 # конфиг показывается без backends и roles: транспорт и модели мутатор не трогает
 EDITABLE_CONFIG_KEYS = ("loop", "rubric", "researcher_focus", "analyzer_hints")
+
+# Правка больше двух ролей за поколение делает результат неатрибутируемым:
+# кандидат выиграл, а какая из четырёх правок сработала — неизвестно, и
+# следующий диагноз строится на догадке. В промпте мутатора это написано
+# словами, здесь — проверено кодом: промпт модель может и не послушаться.
+MAX_ROLES_PER_MUTATION = 2
 
 # Разные углы атаки для разных челленджеров одного поколения. Без этого две
 # попытки по одному диагнозу дают почти одинаковых потомков, и поколение
@@ -37,7 +43,17 @@ class MutationProposal(BaseModel):
 
 
 def to_patch(proposal: MutationProposal) -> CandidatePatch:
-    """Предложение модели → патч для write_candidate. Валидация — там же."""
+    """Предложение модели → патч для write_candidate.
+
+    Здесь же граница «не больше двух ролей за мутацию»: остальную валидацию
+    (неизвестная роль, пустой промпт, невалидный конфиг) делает write_candidate,
+    и дублировать её не нужно.
+    """
+    if len(proposal.prompts) > MAX_ROLES_PER_MUTATION:
+        raise ValueError(
+            f"мутация правит {len(proposal.prompts)} ролей "
+            f"({', '.join(sorted(proposal.prompts))}), допустимо не больше "
+            f"{MAX_ROLES_PER_MUTATION}: иначе непонятно, какая правка сработала")
     return CandidatePatch(config=proposal.config, prompts=proposal.prompts,
                           rationale=proposal.rationale)
 
@@ -53,8 +69,8 @@ def _prompts_block(candidate: Candidate) -> str:
                        for role, text in candidate.prompts.items())
 
 
-def run_mutator(backend, candidate: Candidate, *, diagnosis: Diagnosis,
-                attempt: int) -> MutationProposal:
+def run_mutator(backend, meta: MetaConfig, candidate: Candidate, *,
+                diagnosis: Diagnosis, attempt: int) -> MutationProposal:
     """attempt задаёт угол атаки, поэтому челленджеры поколения различаются."""
     weaknesses = "\n".join(f"- {w}" for w in diagnosis.weaknesses)
     hypotheses = "\n".join(f"- {h}" for h in diagnosis.hypotheses)
@@ -65,6 +81,6 @@ def run_mutator(backend, candidate: Candidate, *, diagnosis: Diagnosis,
             f"Промпты родителя:\n\n{_prompts_block(candidate)}\n\n"
             f"Это попытка №{attempt + 1}. {angle}\n\n"
             f"Верни правки не более чем для двух ролей.")
-    return backend.structured(model=meta_model(candidate),
+    return backend.structured(model=meta.deep_model,
                               system=load_meta_prompt(PROMPT_NAME), user=user,
                               schema=MutationProposal, effort=EFFORT)
