@@ -17,7 +17,13 @@ from kaidzen.backends.openai_compat import MODE_JSON_SCHEMA, OpenAICompatBackend
 TYPE_CLAUDE_AGENT = "claude_agent_sdk"
 TYPE_ANTHROPIC = "anthropic"
 TYPE_OPENAI_COMPAT = "openai_compat"
-KNOWN_TYPES = (TYPE_CLAUDE_AGENT, TYPE_ANTHROPIC, TYPE_OPENAI_COMPAT)
+
+# тип бэкенда → его класс: отсюда же читаются способности (supports_web_search)
+# ДО сборки, то есть без ключей и без единого платного вызова
+BACKEND_CLASSES = {TYPE_CLAUDE_AGENT: ClaudeAgentBackend,
+                   TYPE_ANTHROPIC: AnthropicApiBackend,
+                   TYPE_OPENAI_COMPAT: OpenAICompatBackend}
+KNOWN_TYPES = tuple(BACKEND_CLASSES)
 
 ENV_FILE = ".env"
 COMMENT_PREFIX = "#"
@@ -61,6 +67,17 @@ def _require_key(name: str, spec: dict, root: Path) -> str:
             f"бэкенд '{name}': переменная {env_name} не задана или пуста "
             f"(окружение или файл {ENV_FILE} в корне проекта)")
     return key
+
+
+def supports_web_search(backend_type: str) -> bool:
+    """Умеет ли бэкенд такого типа искать в вебе.
+
+    Способность спрашиваем у самого класса бэкенда: список «кто умеет искать»
+    не должен дублироваться в валидаторе конфига и разъезжаться с кодом.
+    Неизвестный тип отдельно ловит build_backends, здесь он просто «не умеет».
+    """
+    backend_class = BACKEND_CLASSES.get(backend_type)
+    return bool(backend_class and backend_class.supports_web_search)
 
 
 def resolve_api_key(env_name: str, project_root: Path | None = None) -> str:

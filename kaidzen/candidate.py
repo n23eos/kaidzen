@@ -4,14 +4,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, field_validator,
+                      model_validator)
+
+from kaidzen.backends.registry import KNOWN_TYPES, supports_web_search
 
 ROLES = ("analyzer", "researcher", "refiner", "judge")
 # отдельно от ROLES: reporter не имеет своего файла промпта (см. load_candidate),
-# но модель для него обязана быть задана — иначе executive summary падает
-# только в самом конце оплаченного прогона (__main__._generate_summary)
+# но бэкенд и модель для него обязаны быть заданы — иначе executive summary
+# падает только в самом конце оплаченного прогона (__main__._generate_summary)
 REPORTER_ROLE = "reporter"
-REQUIRED_MODEL_ROLES = ROLES + (REPORTER_ROLE,)
+REQUIRED_ROLES = ROLES + (REPORTER_ROLE,)
+# роль, которой веб-поиск не опция, а смысл существования
+SEARCHING_ROLE = "researcher"
+BACKEND_TYPE_KEY = "type"
 RUBRIC_AXES = 5
 
 # границы параметров цикла: за ними прогон либо не стартует,
@@ -33,6 +39,22 @@ class LoopConfig(BaseModel):
         le=MAX_ASSUMPTIONS_PER_ITERATION)
 
 
+class RoleConfig(BaseModel):
+    """Роль знает свой транспорт и свою модель: бэкенд — имя из секции backends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str
+    model: str
+
+    @field_validator("backend", "model")
+    @classmethod
+    def check_not_blank(cls, v: str, info) -> str:
+        if not v.strip():
+            raise ValueError(f"{info.field_name} не должен быть пустым")
+        return v
+
+
 class CandidateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -41,7 +63,8 @@ class CandidateConfig(BaseModel):
     researcher_focus: str = ""
     analyzer_hints: str = ""
     loop: LoopConfig = Field(default_factory=LoopConfig)
-    models: dict[str, str]
+    backends: dict[str, dict]
+    roles: dict[str, RoleConfig]
 
     @field_validator("domain")
     @classmethod
@@ -63,22 +86,77 @@ class CandidateConfig(BaseModel):
             raise ValueError(f"рубрика: пустое описание осей {blank}")
         return v
 
-    @field_validator("models")
+    @field_validator("backends")
     @classmethod
-    def check_models(cls, v: dict[str, str]) -> dict[str, str]:
-        missing = [r for r in REQUIRED_MODEL_ROLES if r not in v]
-        if missing:
-            raise ValueError(f"models: не заданы модели для ролей {missing}")
-        blank = [r for r in REQUIRED_MODEL_ROLES if not v[r].strip()]
-        if blank:
-            raise ValueError(f"models: пустое имя модели для ролей {blank}")
+    def check_backends(cls, v: dict[str, dict]) -> dict[str, dict]:
+        """Типы бэкендов проверяем здесь, а не при сборке: опечатка в type
+        должна ронять загрузку кандидата, а не первый вызов модели."""
+        if not v:
+            raise ValueError("backends: не объявлено ни одного бэкенда")
+        unknown = {name: spec.get(BACKEND_TYPE_KEY) for name, spec in v.items()
+                   if spec.get(BACKEND_TYPE_KEY) not in KNOWN_TYPES}
+        if unknown:
+            raise ValueError(
+                f"backends: неизвестный type у бэкендов {unknown}, "
+                f"допустимы {', '.join(KNOWN_TYPES)}")
         return v
+
+    @model_validator(mode="after")
+    def check_roles(self) -> "CandidateConfig":
+        """Расстановка ролей по бэкендам — вся проверка до первого вызова."""
+        self._check_roles_complete()
+        self._check_backends_declared()
+        self._check_researcher_can_search()
+        return self
+
+    def _check_roles_complete(self) -> None:
+        missing = [r for r in REQUIRED_ROLES if r not in self.roles]
+        if missing:
+            raise ValueError(f"roles: не заданы роли {missing}")
+        unexpected = [r for r in self.roles if r not in REQUIRED_ROLES]
+        if unexpected:
+            raise ValueError(f"roles: неизвестные роли {unexpected}")
+
+    def _check_backends_declared(self) -> None:
+        unknown = {role: cfg.backend for role, cfg in self.roles.items()
+                   if cfg.backend not in self.backends}
+        if unknown:
+            raise ValueError(
+                f"roles: бэкенды {unknown} не объявлены в секции backends "
+                f"(есть: {', '.join(self.backends)})")
+
+    def _check_researcher_can_search(self) -> None:
+        """Researcher без веб-поиска = полировка идеи в вакууме (ТЗ §3.3).
+
+        Способность спрашивается у слоя бэкендов по типу, а не по имени:
+        конфиг волен назвать бэкенд как угодно.
+        """
+        name = self.roles[SEARCHING_ROLE].backend
+        backend_type = self.backends[name].get(BACKEND_TYPE_KEY)
+        if supports_web_search(backend_type):
+            return
+        raise ValueError(
+            f"роль {SEARCHING_ROLE} стоит на бэкенде '{name}' "
+            f"(type={backend_type}), который не умеет веб-поиск: без поиска "
+            f"Researcher не может закрывать допущения фактами и вернёт "
+            f"ссылки из памяти модели. Поставьте роль на бэкенд с поиском.")
 
 
 class Candidate(BaseModel):
     candidate_id: str
     config: CandidateConfig
     prompts: dict[str, str]
+
+
+def backends_by_role(candidate: "Candidate",
+                     built: dict[str, object]) -> dict[str, object]:
+    """Роль → её экземпляр бэкенда. Один бэкенд может обслуживать несколько ролей.
+
+    Дальше по коду цикл видит только это отображение и не знает ни имён
+    бэкендов, ни их типов: транспорт для роли выбран один раз, на старте.
+    """
+    return {role: built[cfg.backend]
+            for role, cfg in candidate.config.roles.items()}
 
 
 def load_candidate(path: Path) -> Candidate:

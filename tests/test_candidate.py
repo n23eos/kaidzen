@@ -16,12 +16,14 @@ loop:
   max_iterations: 6
   plateau_threshold: 0.5
   assumptions_per_iteration: 3
-models:
-  analyzer: claude-sonnet-5
-  researcher: claude-sonnet-5
-  refiner: claude-sonnet-5
-  judge: claude-sonnet-5
-  reporter: claude-sonnet-5
+backends:
+  subscription: { type: claude_agent_sdk }
+roles:
+  analyzer:   { backend: subscription, model: claude-sonnet-5 }
+  researcher: { backend: subscription, model: claude-sonnet-5 }
+  refiner:    { backend: subscription, model: claude-sonnet-5 }
+  judge:      { backend: subscription, model: claude-sonnet-5 }
+  reporter:   { backend: subscription, model: claude-sonnet-5 }
 """
 
 PROMPTS = ["analyzer.md", "researcher.md", "refiner.md", "judge.md"]
@@ -57,18 +59,75 @@ def test_rubric_must_have_5_axes(tmp_path):
         load_candidate(make_candidate(tmp_path, bad))
 
 
-def test_models_must_cover_all_roles(tmp_path):
-    bad = VALID_CONFIG.replace("  judge: claude-sonnet-5\n", "")
+def role_line(role: str, backend: str = "subscription") -> str:
+    """Строка роли из VALID_CONFIG — тесты подменяют её точечно."""
+    pad = " " * (len("researcher") - len(role))
+    return f"  {role}:{pad} {{ backend: {backend}, model: claude-sonnet-5 }}\n"
+
+
+def test_roles_must_cover_all_of_them(tmp_path):
+    bad = VALID_CONFIG.replace(role_line("judge"), "")
     with pytest.raises(ValueError, match="judge"):
         load_candidate(make_candidate(tmp_path, bad))
 
 
-def test_models_must_include_reporter(tmp_path):
-    """Пятая роль: executive summary читает models.reporter в конце прогона —
+def test_roles_must_include_reporter(tmp_path):
+    """Пятая роль: executive summary читает roles.reporter в конце прогона —
     без проверки при загрузке конфиг ломается только после оплаченного цикла."""
-    bad = VALID_CONFIG.replace("  reporter: claude-sonnet-5\n", "")
+    bad = VALID_CONFIG.replace(role_line("reporter"), "")
     with pytest.raises(ValueError, match="reporter"):
         load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_unknown_role_rejected(tmp_path):
+    bad = VALID_CONFIG + role_line("designer")
+    with pytest.raises(ValueError, match="designer"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_role_backend_must_be_declared(tmp_path):
+    bad = VALID_CONFIG.replace(role_line("refiner"),
+                               role_line("refiner", "openai"))
+    with pytest.raises(ValueError, match="openai"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_unknown_backend_type_rejected(tmp_path):
+    bad = VALID_CONFIG.replace("type: claude_agent_sdk", "type: telepathy")
+    with pytest.raises(ValueError, match="telepathy"):
+        load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_researcher_on_backend_without_web_search_rejected(tmp_path):
+    """Главная проверка §3.3: без поиска Researcher вернёт ссылки из памяти."""
+    bad = (VALID_CONFIG
+           .replace("  subscription: { type: claude_agent_sdk }",
+                    "  subscription: { type: claude_agent_sdk }\n"
+                    "  deepseek: { type: openai_compat, "
+                    "api_key_env: DEEPSEEK_API_KEY }")
+           .replace(role_line("researcher"),
+                    role_line("researcher", "deepseek")))
+
+    with pytest.raises(ValueError) as exc:
+        load_candidate(make_candidate(tmp_path, bad))
+
+    message = str(exc.value)
+    assert "deepseek" in message          # назван сам бэкенд
+    assert "поиск" in message             # и причина отказа
+
+
+def test_non_searching_backend_is_fine_for_other_roles(tmp_path):
+    """openai_compat не умеет искать, но Judge поиск и не нужен."""
+    ok = (VALID_CONFIG
+          .replace("  subscription: { type: claude_agent_sdk }",
+                   "  subscription: { type: claude_agent_sdk }\n"
+                   "  deepseek: { type: openai_compat, "
+                   "api_key_env: DEEPSEEK_API_KEY }")
+          .replace(role_line("judge"), role_line("judge", "deepseek")))
+
+    candidate = load_candidate(make_candidate(tmp_path, ok))
+
+    assert candidate.config.roles["judge"].backend == "deepseek"
 
 
 def test_missing_prompt_raises(tmp_path):
@@ -119,8 +178,10 @@ def test_empty_prompt_file_rejected(tmp_path):
 
 
 def test_blank_model_name_rejected(tmp_path):
-    bad = VALID_CONFIG.replace("  judge: claude-sonnet-5", '  judge: ""')
-    with pytest.raises(ValueError, match="judge"):
+    bad = VALID_CONFIG.replace(role_line("judge"),
+                               "  judge:      { backend: subscription, "
+                               'model: "" }\n')
+    with pytest.raises(ValueError, match="model"):
         load_candidate(make_candidate(tmp_path, bad))
 
 
@@ -143,13 +204,8 @@ def test_non_mapping_config_rejected(tmp_path, text):
 
 
 def test_loop_defaults_when_section_absent(tmp_path):
-    bare = VALID_CONFIG.split("loop:")[0] + """models:
-  analyzer: m
-  researcher: m
-  refiner: m
-  judge: m
-  reporter: m
-"""
+    bare = VALID_CONFIG.split("loop:")[0] + VALID_CONFIG.split("backends:")[1]
+    bare = bare.replace("  subscription", "backends:\n  subscription", 1)
     c = load_candidate(make_candidate(tmp_path, bare))
     assert c.config.loop.max_iterations == 6
     assert c.config.loop.plateau_threshold == 0.5
@@ -203,3 +259,10 @@ def test_shipped_researcher_prompt_forbids_invented_urls(shipped):
     researcher = shipped.prompts["researcher"].lower()
     assert "придумывать" in researcher
     assert "запрещено" in researcher
+
+
+def test_empty_backends_section_rejected(tmp_path):
+    bad = VALID_CONFIG.replace("backends:\n  subscription: { type: claude_agent_sdk }\n",
+                               "backends: {}\n")
+    with pytest.raises(ValueError, match="backends"):
+        load_candidate(make_candidate(tmp_path, bad))

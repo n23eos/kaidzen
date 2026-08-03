@@ -11,9 +11,11 @@ loop:
   max_iterations: 6
   plateau_threshold: 0.5
   assumptions_per_iteration: 3
-models:
-  analyzer: claude-sonnet-5
-  researcher: claude-sonnet-5
-  refiner: claude-sonnet-5
-  judge: claude-sonnet-5
-  reporter: claude-sonnet-5
+backends:
+  subscription: { type: claude_agent_sdk }
+roles:
+  analyzer:   { backend: subscription, model: claude-sonnet-5 }
+  researcher: { backend: subscription, model: claude-sonnet-5 }
+  refiner:    { backend: subscription, model: claude-sonnet-5 }
+  judge:      { backend: subscription, model: claude-sonnet-5 }
+  reporter:   { backend: subscription, model: claude-sonnet-5 }
