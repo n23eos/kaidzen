@@ -18,13 +18,13 @@ class RefinerOutput(BaseModel):
     changelog: list[ChangelogEntry] = Field(default_factory=list)
 
 
-def run_refiner(llm, candidate: Candidate, *, idea_text: str,
+def run_refiner(backend, candidate: Candidate, *, idea_text: str,
                 findings_json: str, critique: list[str]) -> RefinerOutput:
     crit = "\n".join(f"- {c}" for c in critique) or NO_CRITIQUE
     user = (f"Текущая версия идеи:\n\n{idea_text}\n\n"
             f"Свежие находки Researcher (JSON):\n{findings_json}\n\n"
             f"Критика Judge с прошлой итерации:\n{crit}")
-    return llm.structured(model=candidate.config.models["refiner"],
-                          system=candidate.prompts["refiner"], user=user,
-                          schema=RefinerOutput, effort=EFFORT,
-                          max_tokens=MAX_TOKENS)
+    return backend.structured(model=candidate.config.roles["refiner"].model,
+                              system=candidate.prompts["refiner"], user=user,
+                              schema=RefinerOutput, effort=EFFORT,
+                              max_tokens=MAX_TOKENS)

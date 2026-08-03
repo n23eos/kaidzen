@@ -8,7 +8,7 @@ from kaidzen.state import Assumption, JudgeResult
 EFFORT = "low"
 
 
-def run_judge(llm, candidate: Candidate, *, new_idea: str, previous_idea: str,
+def run_judge(backend, candidate: Candidate, *, new_idea: str, previous_idea: str,
               assumptions: list[Assumption]) -> JudgeResult:
     rubric = "\n".join(f"- {axis}: {desc}"
                        for axis, desc in candidate.config.rubric.items())
@@ -22,9 +22,9 @@ def run_judge(llm, candidate: Candidate, *, new_idea: str, previous_idea: str,
             f"Реестр допущений:\n{registry}\n\n"
             f"ПРЕДЫДУЩАЯ версия идеи:\n{previous_idea}\n\n"
             f"НОВАЯ версия идеи:\n{new_idea}")
-    result = llm.structured(model=candidate.config.models["judge"],
-                            system=candidate.prompts["judge"], user=user,
-                            schema=JudgeResult, effort=EFFORT)
+    result = backend.structured(model=candidate.config.roles["judge"].model,
+                                system=candidate.prompts["judge"], user=user,
+                                schema=JudgeResult, effort=EFFORT)
     _check_axes(result, candidate)
     return result
 

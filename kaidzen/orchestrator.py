@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable, Optional, TypeVar
+from typing import Callable, TypeVar
 
 import anthropic
 
@@ -56,6 +56,10 @@ STEP_WARNING = "warning"
 # шаги, на которых возобновление входит в середину итерации;
 # остальные значения last_completed_step означают границу итерации
 MID_ITERATION_STEPS = (STEP_RESEARCHER, STEP_REFINER)
+
+# ключи снапшота конфига: по ним отличается прогон, начатый до сменных бэкендов
+ROLES_KEY = "roles"
+LEGACY_MODELS_KEY = "models"
 
 STOP_MAX_ITERATIONS = "max_iterations"
 STOP_DEGRADING = "degrading"
@@ -146,12 +150,16 @@ def _previous_scored_total(state: RunState) -> float | None:
     return None
 
 
-def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
+def run_pipeline(backends, candidate: Candidate, *, idea_text: str, run_dir: Path,
                  resume: bool = False,
                  candidate_dir: Path | None = None,
                  on_step: Callable[[str, RunState], None] | None = None
                  ) -> RunState:
     """Полный прогон: Analyzer один раз, затем цикл Researcher→Refiner→Judge.
+
+    backends — отображение «имя роли → её бэкенд» (candidate.backends_by_role).
+    У каждой роли свой транспорт; логика цикла о нём ничего не знает и лишь
+    суммирует расход всех бэкендов в state.api_usage.
 
     Состояние сохраняется после каждого завершённого шага, поэтому прогон,
     убитый Ctrl+C или падением API, продолжается с того же места (resume=True)
@@ -174,9 +182,11 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
     """
     state = load_state(run_dir) if resume else _new_state(candidate, idea_text,
                                                           run_dir, candidate_dir)
+    if resume:
+        _check_snapshot_shape(state)
     loop = _loop_from_state(state) if resume else candidate.config.loop
     if state.analysis is None:
-        _step_analyzer(llm, candidate, state, run_dir, on_step)
+        _step_analyzer(backends, candidate, state, run_dir, on_step)
 
     # с какого шага продолжаем прерванную итерацию (None = с её начала)
     entry = state.last_completed_step if resume else None
@@ -185,13 +195,31 @@ def run_pipeline(llm, candidate: Candidate, *, idea_text: str, run_dir: Path,
         if entry is None:
             reason = check_stop(state, loop)
             if reason:
-                return _finish(state, run_dir, llm, reason)
-            if not _step_researcher(llm, candidate, state, run_dir, loop, on_step):
-                return _finish(state, run_dir, llm, STOP_ASSUMPTIONS_EXHAUSTED)
+                return _finish(state, run_dir, backends, reason)
+            if not _step_researcher(backends, candidate, state, run_dir, loop, on_step):
+                return _finish(state, run_dir, backends, STOP_ASSUMPTIONS_EXHAUSTED)
         if entry in (None, STEP_RESEARCHER):
-            _step_refiner(llm, candidate, state, run_dir, on_step)
-        _step_judge(llm, candidate, state, run_dir, loop, on_step)
+            _step_refiner(backends, candidate, state, run_dir, on_step)
+        _step_judge(backends, candidate, state, run_dir, loop, on_step)
         entry = None
+
+
+def _check_snapshot_shape(state: RunState) -> None:
+    """Снапшот конфига должен быть в текущей форме (backends + roles).
+
+    Прогоны до перехода на сменные бэкенды записали в state.config секцию
+    models: тогда весь цикл шёл через один Anthropic API, и по такому снапшоту
+    неизвестно, на каком транспорте продолжать. Молча продолжить — значит
+    дописать в чужой прогон шаги, сделанные другими моделями, поэтому здесь
+    явный отказ. Отчёт по такому прогону по-прежнему собирается: команда
+    report снапшот не читает.
+    """
+    if LEGACY_MODELS_KEY in state.config and ROLES_KEY not in state.config:
+        raise ValueError(
+            f"прогон {state.run_id} запущен до перехода на сменные бэкенды "
+            f"(в state.config есть '{LEGACY_MODELS_KEY}', нет '{ROLES_KEY}') — "
+            f"продолжить его нельзя: неизвестно, какими бэкендами он шёл. "
+            f"Отчёт по нему собирается: python -m kaidzen report <каталог>")
 
 
 def _loop_from_state(state: RunState) -> LoopConfig:
@@ -222,20 +250,20 @@ def _new_state(candidate: Candidate, idea_text: str, run_dir: Path,
                     config=config, original_idea=idea_text)
 
 
-def _step_analyzer(llm, candidate: Candidate, state: RunState,
+def _step_analyzer(backends, candidate: Candidate, state: RunState,
                    run_dir: Path,
                    on_step: Callable[[str, RunState], None] | None = None
                    ) -> None:
     """Раскладывает сырую идею и заполняет реестр допущений."""
-    out = _with_retry(lambda: run_analyzer(llm, candidate,
+    out = _with_retry(lambda: run_analyzer(backends[STEP_ANALYZER], candidate,
                                            idea_text=state.original_idea))
     state.analysis = Analysis(problem=out.problem, audience=out.audience,
                               mechanism=out.mechanism, unknowns=out.unknowns)
     state.assumptions = list(out.assumptions)
-    _checkpoint(state, run_dir, llm, STEP_ANALYZER, on_step)
+    _checkpoint(state, run_dir, backends, STEP_ANALYZER, on_step)
 
 
-def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
+def _step_researcher(backends, candidate: Candidate, state: RunState, run_dir: Path,
                      loop: LoopConfig,
                      on_step: Callable[[str, RunState], None] | None = None
                      ) -> bool:
@@ -245,11 +273,11 @@ def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
     if not selected:
         return False
     out, unknown_ids = _with_retry(
-        lambda: _research_and_apply(llm, candidate, state, selected))
+        lambda: _research_and_apply(backends, candidate, state, selected))
     # находки нужны Refiner'у целиком; в реестр попадают только статус и факты,
     # поэтому сырой JSON кладём в состояние — иначе возобновление их потеряет
     state.pending_findings = out.model_dump_json()
-    _checkpoint(state, run_dir, llm, STEP_RESEARCHER, on_step)
+    _checkpoint(state, run_dir, backends, STEP_RESEARCHER, on_step)
     if unknown_ids:
         _notify(on_step,
                 f"{STEP_WARNING}: Researcher вернул находки по неизвестным "
@@ -257,10 +285,10 @@ def _step_researcher(llm, candidate: Candidate, state: RunState, run_dir: Path,
     return True
 
 
-def _research_and_apply(llm, candidate: Candidate, state: RunState,
+def _research_and_apply(backends, candidate: Candidate, state: RunState,
                         selected: list[Assumption]):
     """Один вызов Researcher вместе с разбором ответа — целиком под ретраем."""
-    out = run_researcher(llm, candidate, idea_text=state.current_idea_text(),
+    out = run_researcher(backends[STEP_RESEARCHER], candidate, idea_text=state.current_idea_text(),
                          assumptions=selected)
     return out, _apply_findings(state, out)
 
@@ -292,7 +320,7 @@ def _apply_findings(state: RunState, researcher_output) -> list[str]:
     return unknown_ids
 
 
-def _step_refiner(llm, candidate: Candidate, state: RunState,
+def _step_refiner(backends, candidate: Candidate, state: RunState,
                   run_dir: Path,
                   on_step: Callable[[str, RunState], None] | None = None
                   ) -> None:
@@ -302,16 +330,16 @@ def _step_refiner(llm, candidate: Candidate, state: RunState,
     отката текущая версия — это позапрошлый текст с позапрошлой критикой, и
     Refiner повторил бы ровно то изменение, из-за которого случился откат.
     """
-    out = _with_retry(lambda: _refine_and_check(llm, candidate, state))
+    out = _with_retry(lambda: _refine_and_check(backends, candidate, state))
     state.versions.append(Version(n=len(state.versions) + 1,
                                   idea_text=out.idea_text,
                                   changelog=out.changelog))
-    _checkpoint(state, run_dir, llm, STEP_REFINER, on_step)
+    _checkpoint(state, run_dir, backends, STEP_REFINER, on_step)
 
 
-def _refine_and_check(llm, candidate: Candidate, state: RunState):
+def _refine_and_check(backends, candidate: Candidate, state: RunState):
     """Один вызов Refiner вместе с проверкой обоснованности — под ретраем."""
-    out = run_refiner(llm, candidate, idea_text=state.current_idea_text(),
+    out = run_refiner(backends[STEP_REFINER], candidate, idea_text=state.current_idea_text(),
                       findings_json=state.pending_findings or "",
                       critique=state.last_critique)
     _check_grounding(state, out)
@@ -339,20 +367,20 @@ def _check_grounding(state: RunState, refiner_output) -> None:
             f"{', '.join(unknown)}")
 
 
-def _step_judge(llm, candidate: Candidate, state: RunState, run_dir: Path,
+def _step_judge(backends, candidate: Candidate, state: RunState, run_dir: Path,
                 loop: LoopConfig,
                 on_step: Callable[[str, RunState], None] | None = None
                 ) -> None:
     """Оценивает новую версию и применяет вердикт."""
     new_version = state.versions[-1]
     judge = _with_retry(lambda: run_judge(
-        llm, candidate, new_idea=new_version.idea_text,
+        backends[STEP_JUDGE], candidate, new_idea=new_version.idea_text,
         previous_idea=_idea_before_last_version(state),
         assumptions=state.assumptions))
     apply_judge_verdict(state, judge, loop)
     state.iteration += 1
     state.pending_findings = None
-    _checkpoint(state, run_dir, llm, STEP_JUDGE, on_step)
+    _checkpoint(state, run_dir, backends, STEP_JUDGE, on_step)
 
 
 def _idea_before_last_version(state: RunState) -> str:
@@ -387,11 +415,11 @@ def _with_retry(call: Callable[[], T]) -> T:
     raise AssertionError("недостижимо")  # pragma: no cover
 
 
-def _checkpoint(state: RunState, run_dir: Path, llm, step: str,
+def _checkpoint(state: RunState, run_dir: Path, backends, step: str,
                 on_step: Callable[[str, RunState], None] | None = None
                 ) -> None:
     state.last_completed_step = step
-    _save(state, run_dir, llm)
+    _save(state, run_dir, backends)
     _notify(on_step, step, state)
 
 
@@ -407,15 +435,39 @@ def _notify(on_step: Callable[[str, RunState], None] | None, step: str,
         pass
 
 
-def _finish(state: RunState, run_dir: Path, llm, reason: str) -> RunState:
+def _finish(state: RunState, run_dir: Path, backends, reason: str) -> RunState:
     state.stop_reason = reason
-    _save(state, run_dir, llm)
+    _save(state, run_dir, backends)
     return state
 
 
-def _save(state: RunState, run_dir: Path, llm) -> None:
+def _save(state: RunState, run_dir: Path, backends: dict) -> None:
     """Атомарная запись состояния вместе со свежим расходом токенов."""
-    usage: Optional[ApiUsage] = getattr(llm, "usage", None)
-    if usage is not None:
-        state.api_usage = ApiUsage.model_validate(usage, from_attributes=True)
+    state.api_usage = total_usage(backends)
     save_state(state, run_dir)
+
+
+def total_usage(backends: dict) -> ApiUsage:
+    """Суммарный расход всех бэкендов прогона.
+
+    Счётчик у каждого бэкенда свой, а в отчёте нужна общая цифра. Один и тот
+    же экземпляр обслуживает несколько ролей (обычная схема: всё на подписке),
+    поэтому считаем каждый экземпляр ровно один раз.
+    """
+    usages = [u for u in (getattr(b, "usage", None)
+                          for b in _unique_backends(backends)) if u is not None]
+    return ApiUsage(
+        input_tokens=sum(u.input_tokens for u in usages),
+        output_tokens=sum(u.output_tokens for u in usages),
+        web_searches=sum(u.web_searches for u in usages))
+
+
+def _unique_backends(backends: dict) -> list:
+    """Экземпляры без повторов, в порядке ролей: dict по объектам не построить."""
+    seen: set[int] = set()
+    unique = []
+    for backend in backends.values():
+        if id(backend) not in seen:
+            seen.add(id(backend))
+            unique.append(backend)
+    return unique

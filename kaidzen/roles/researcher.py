@@ -24,7 +24,7 @@ class ResearcherOutput(BaseModel):
     findings: list[ResearchFinding]
 
 
-def run_researcher(llm, candidate: Candidate, *, idea_text: str,
+def run_researcher(backend, candidate: Candidate, *, idea_text: str,
                    assumptions: list[Assumption]) -> ResearcherOutput:
     listing = "\n".join(f"- {a.id} [{a.criticality}]: {a.text}" for a in assumptions)
     # id перечисляем отдельной строкой: оркестратор сопоставляет находки с
@@ -36,7 +36,7 @@ def run_researcher(llm, candidate: Candidate, *, idea_text: str,
             f"В поле assumption_id верни ровно эти assumption_id: {ids} — "
             f"не меняй их написание и не придумывай новых.\n\n"
             f"Фокус поиска: {candidate.config.researcher_focus}")
-    return llm.structured(model=candidate.config.models["researcher"],
-                          system=candidate.prompts["researcher"], user=user,
-                          schema=ResearcherOutput, effort=EFFORT,
-                          web_search=True, max_searches=MAX_SEARCHES_PER_CALL)
+    return backend.structured(model=candidate.config.roles["researcher"].model,
+                              system=candidate.prompts["researcher"], user=user,
+                              schema=ResearcherOutput, effort=EFFORT,
+                              web_search=True, max_searches=MAX_SEARCHES_PER_CALL)

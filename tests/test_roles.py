@@ -26,7 +26,7 @@ def test_analyzer_passes_idea_domain_and_hints(candidate):
     assert "моя идея" in call["user"]
     assert candidate.config.domain in call["user"]
     assert call["system"] == candidate.prompts["analyzer"]
-    assert call["model"] == candidate.config.models["analyzer"]
+    assert call["model"] == candidate.config.roles["analyzer"].model
     assert call["effort"] == analyzer_effort
     assert call["schema"] is AnalyzerOutput
 

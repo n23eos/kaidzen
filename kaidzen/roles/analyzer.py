@@ -17,10 +17,10 @@ class AnalyzerOutput(BaseModel):
     unknowns: list[str] = Field(default_factory=list)
 
 
-def run_analyzer(llm, candidate: Candidate, *, idea_text: str) -> AnalyzerOutput:
+def run_analyzer(backend, candidate: Candidate, *, idea_text: str) -> AnalyzerOutput:
     user = (f"Идея для декомпозиции:\n\n{idea_text}\n\n"
             f"Домен: {candidate.config.domain}\n"
             f"Подсказки: {candidate.config.analyzer_hints}")
-    return llm.structured(model=candidate.config.models["analyzer"],
-                          system=candidate.prompts["analyzer"], user=user,
-                          schema=AnalyzerOutput, effort=EFFORT)
+    return backend.structured(model=candidate.config.roles["analyzer"].model,
+                              system=candidate.prompts["analyzer"], user=user,
+                              schema=AnalyzerOutput, effort=EFFORT)

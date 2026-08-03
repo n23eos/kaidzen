@@ -4,7 +4,7 @@ import pytest
 
 from kaidzen import orchestrator
 from kaidzen.candidate import Candidate, LoopConfig
-from kaidzen.llm import SchemaValidationFailure
+from kaidzen.llm import SchemaValidationFailure, SearchNotPerformed
 from kaidzen.orchestrator import (apply_judge_verdict, check_stop,
                                   run_pipeline, select_assumptions)
 from kaidzen.roles.analyzer import AnalyzerOutput
@@ -13,7 +13,7 @@ from kaidzen.roles.researcher import ResearchFinding, ResearcherOutput
 from kaidzen.state import (ApiUsage, Assumption, ChangelogEntry, Fact,
                            JudgeResult, RunState, Version, load_state,
                            save_state)
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, as_backends
 
 
 def transient() -> Exception:
@@ -240,7 +240,7 @@ def test_pipeline_runs_one_iteration_and_stops_on_exhausted(candidate, tmp_path)
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                          run_dir=run_dir, resume=False)
 
     assert state.run_id == "run-1"
@@ -270,7 +270,7 @@ def test_pipeline_records_candidate_dir_in_config_snapshot(candidate, tmp_path):
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                          run_dir=run_dir, resume=False,
                          candidate_dir=candidate_dir)
 
@@ -286,7 +286,7 @@ def test_pipeline_passes_previous_idea_and_critique_to_roles(candidate, tmp_path
                    refiner_out("версия 2"),
                    make_judge(delta=2.0)])
 
-    run_pipeline(llm, candidate, idea_text="сырая идея",
+    run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                  run_dir=tmp_path / "run-1",
                  resume=False)
 
@@ -305,7 +305,7 @@ def test_pipeline_stops_when_no_unverified_assumptions_left(candidate, tmp_path)
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "assumptions_exhausted"
@@ -319,7 +319,7 @@ def test_pipeline_stops_on_max_iterations(candidate, tmp_path):
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, limited, idea_text="идея",
+    state = run_pipeline(as_backends(llm), limited, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "max_iterations"
@@ -336,7 +336,7 @@ def test_pipeline_stops_on_plateau(candidate, tmp_path):
                    refiner_out("версия 2"),
                    make_judge(delta=0.1)])
 
-    state = run_pipeline(llm, loop_candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), loop_candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "plateau"
@@ -351,7 +351,7 @@ def test_pipeline_rollback_marks_version_and_keeps_previous_text(candidate,
                    refiner_out("плохая версия"),
                    make_judge(verdict="rollback", delta=-3.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.versions[0].rolled_back is True
@@ -369,7 +369,7 @@ def test_pipeline_copies_usage_into_state(candidate, tmp_path):
                    make_judge(delta=2.0)])
     llm.usage = ApiUsage(input_tokens=120, output_tokens=45, web_searches=3)
 
-    state = run_pipeline(llm, candidate, idea_text="идея", run_dir=run_dir,
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея", run_dir=run_dir,
                          resume=False)
 
     assert state.api_usage == ApiUsage(input_tokens=120, output_tokens=45,
@@ -384,7 +384,7 @@ def test_pipeline_retries_transient_errors(candidate, tmp_path):
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "assumptions_exhausted"
@@ -398,7 +398,7 @@ def test_pipeline_resumes_after_researcher_step(candidate, tmp_path):
                         RuntimeError("API упал")])
 
     with pytest.raises(RuntimeError, match="API упал"):
-        run_pipeline(crashing, candidate, idea_text="сырая идея",
+        run_pipeline(as_backends(crashing), candidate, idea_text="сырая идея",
                      run_dir=run_dir, resume=False)
 
     saved = load_state(run_dir)
@@ -408,7 +408,7 @@ def test_pipeline_resumes_after_researcher_step(candidate, tmp_path):
     assert saved.versions == []
 
     resumed_llm = FakeLLM([refiner_out("версия 1"), make_judge(delta=2.0)])
-    state = run_pipeline(resumed_llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(resumed_llm), candidate, idea_text="сырая идея",
                          run_dir=run_dir, resume=True)
 
     assert len(resumed_llm.calls) == 2          # Analyzer/Researcher не повторились
@@ -427,13 +427,13 @@ def test_pipeline_resumes_after_refiner_step(candidate, tmp_path):
                         RuntimeError("Judge упал")])
 
     with pytest.raises(RuntimeError, match="Judge упал"):
-        run_pipeline(crashing, candidate, idea_text="сырая идея",
+        run_pipeline(as_backends(crashing), candidate, idea_text="сырая идея",
                      run_dir=run_dir, resume=False)
 
     assert load_state(run_dir).last_completed_step == "refiner"
 
     resumed_llm = FakeLLM([make_judge(delta=2.0)])
-    state = run_pipeline(resumed_llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(resumed_llm), candidate, idea_text="сырая идея",
                          run_dir=run_dir, resume=True)
 
     assert len(resumed_llm.calls) == 1
@@ -450,14 +450,14 @@ def test_pipeline_resumes_after_analyzer_step(candidate, tmp_path):
                         RuntimeError("Researcher упал")])
 
     with pytest.raises(RuntimeError):
-        run_pipeline(crashing, candidate, idea_text="идея", run_dir=run_dir,
+        run_pipeline(as_backends(crashing), candidate, idea_text="идея", run_dir=run_dir,
                      resume=False)
 
     assert load_state(run_dir).last_completed_step == "analyzer"
 
     resumed_llm = FakeLLM([research_out(("A1", "confirmed")),
                            refiner_out("версия 1"), make_judge(delta=2.0)])
-    state = run_pipeline(resumed_llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(resumed_llm), candidate, idea_text="идея",
                          run_dir=run_dir, resume=True)
 
     assert len(resumed_llm.calls) == 3
@@ -472,7 +472,7 @@ def test_pipeline_without_callback_behaves_as_before(candidate, tmp_path):
                    refiner_out("версия 1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "assumptions_exhausted"
@@ -485,9 +485,9 @@ def test_pipeline_calls_on_step_once_per_step_in_order(candidate, tmp_path):
                    make_judge(delta=2.0)])
     calls: list[str] = []
 
-    run_pipeline(llm, candidate, idea_text="сырая идея",
-                run_dir=tmp_path / "run-1", resume=False,
-                on_step=lambda step, state: calls.append(step))
+    run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
+                 run_dir=tmp_path / "run-1", resume=False,
+                 on_step=lambda step, state: calls.append(step))
 
     assert calls == ["analyzer", "researcher", "refiner", "judge"]
 
@@ -504,8 +504,8 @@ def test_pipeline_on_step_sees_state_already_reflecting_the_step(candidate,
         if step == "analyzer":
             seen["assumptions"] = len(state.assumptions)
 
-    run_pipeline(llm, candidate, idea_text="сырая идея",
-                run_dir=tmp_path / "run-1", resume=False, on_step=on_step)
+    run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
+                 run_dir=tmp_path / "run-1", resume=False, on_step=on_step)
 
     assert seen["assumptions"] == 1
 
@@ -519,7 +519,7 @@ def test_pipeline_survives_a_raising_callback(candidate, tmp_path):
     def boom(step, state):
         raise RuntimeError("проблема с выводом прогресса")
 
-    state = run_pipeline(llm, candidate, idea_text="сырая идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="сырая идея",
                          run_dir=tmp_path / "run-1", resume=False,
                          on_step=boom)
 
@@ -535,7 +535,7 @@ def test_pipeline_fails_when_every_finding_has_unknown_id(candidate, tmp_path):
                   + [research_out(("A-1", "confirmed"))] * 3)
 
     with pytest.raises(ValueError, match="A-1"):
-        run_pipeline(llm, candidate, idea_text="идея",
+        run_pipeline(as_backends(llm), candidate, idea_text="идея",
                      run_dir=tmp_path / "run-1", resume=False)
 
 
@@ -546,7 +546,7 @@ def test_pipeline_retries_researcher_after_unknown_ids(candidate, tmp_path):
                    refiner_out("версия 1", "A1"),
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.assumptions[0].status == "confirmed"
@@ -560,7 +560,7 @@ def test_pipeline_applies_known_ids_and_reports_unknown_ones(candidate, tmp_path
                    make_judge(delta=2.0)])
     steps: list[str] = []
 
-    state = run_pipeline(llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False,
                          on_step=lambda step, _state: steps.append(step))
 
@@ -580,7 +580,7 @@ def crash_after_researcher(candidate, tmp_path, run_dir) -> None:
                         research_out(("A1", "confirmed")),
                         RuntimeError("API упал")])
     with pytest.raises(RuntimeError):
-        run_pipeline(crashing, candidate, idea_text="идея", run_dir=run_dir,
+        run_pipeline(as_backends(crashing), candidate, idea_text="идея", run_dir=run_dir,
                      resume=False)
 
 
@@ -594,7 +594,7 @@ def test_resume_uses_loop_config_from_state_not_from_candidate(candidate,
 
     # кандидат «с диска» разрешает 6 итераций — но прогон стартовал с 1
     resumed_llm = FakeLLM([refiner_out("версия 1", "A1"), make_judge(delta=2.0)])
-    state = run_pipeline(resumed_llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(resumed_llm), candidate, idea_text="идея",
                          run_dir=run_dir, resume=True)
 
     assert state.stop_reason == "max_iterations"
@@ -610,7 +610,7 @@ def test_resume_fails_loudly_when_state_has_no_loop_snapshot(tmp_path,
                run_dir)
 
     with pytest.raises(ValueError, match="loop"):
-        run_pipeline(FakeLLM([]), candidate, idea_text="идея", run_dir=run_dir,
+        run_pipeline(as_backends(FakeLLM([])), candidate, idea_text="идея", run_dir=run_dir,
                      resume=True)
 
 
@@ -622,7 +622,7 @@ def test_pipeline_rejects_refiner_without_changelog(candidate, tmp_path):
                    research_out(("A1", "confirmed"))] + [empty] * 3)
 
     with pytest.raises(ValueError, match="changelog"):
-        run_pipeline(llm, candidate, idea_text="идея",
+        run_pipeline(as_backends(llm), candidate, idea_text="идея",
                      run_dir=tmp_path / "run-1", resume=False)
 
 
@@ -633,7 +633,7 @@ def test_pipeline_rejects_changelog_grounded_in_unknown_assumption(candidate,
                   + [refiner_out("версия 1", "A7")] * 3)
 
     with pytest.raises(ValueError, match="A7"):
-        run_pipeline(llm, candidate, idea_text="идея",
+        run_pipeline(as_backends(llm), candidate, idea_text="идея",
                      run_dir=tmp_path / "run-1", resume=False)
 
 
@@ -644,7 +644,7 @@ def test_pipeline_retries_refiner_after_bad_grounding(candidate, tmp_path):
                    refiner_out("версия 1", "A1"),     # повтор удался
                    make_judge(delta=2.0)])
 
-    state = run_pipeline(llm, candidate, idea_text="идея",
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
                          run_dir=tmp_path / "run-1", resume=False)
 
     assert state.stop_reason == "assumptions_exhausted"
@@ -731,7 +731,7 @@ def test_pipeline_feeds_rolled_back_critique_to_next_refiner(candidate,
                    refiner_out("версия 2", "A2"),
                    make_judge(delta=2.0)])
 
-    run_pipeline(llm, loop_candidate, idea_text="сырая идея",
+    run_pipeline(as_backends(llm), loop_candidate, idea_text="сырая идея",
                  run_dir=tmp_path / "run-1", resume=False)
 
     second_refiner = llm.calls[5]["user"]
@@ -749,7 +749,106 @@ def test_pipeline_does_not_retry_deterministic_failures(candidate, tmp_path,
     llm = FakeLLM([analyzer_out(high("A1")), error])
 
     with pytest.raises(type(error)):
-        run_pipeline(llm, candidate, idea_text="идея",
+        run_pipeline(as_backends(llm), candidate, idea_text="идея",
                      run_dir=tmp_path / "run-1", resume=False)
 
     assert len(llm.calls) == 2      # ни одного лишнего платного вызова
+
+
+# --- у каждой роли свой бэкенд (мультибэкенд) --------------------------------
+
+def test_pipeline_calls_the_backend_of_each_role(candidate, tmp_path):
+    """Роль обязана ходить в СВОЙ бэкенд: иначе «дешёвый Judge на DeepSeek»
+    молча оплачивался бы ключом соседней роли."""
+    # Arrange
+    analyzer = FakeLLM([analyzer_out(high("A1"))])
+    researcher = FakeLLM([research_out(("A1", "confirmed"))])
+    refiner = FakeLLM([refiner_out("версия 1", "A1")])
+    judge = FakeLLM([make_judge(delta=2.0)])
+    backends = as_backends(FakeLLM([]), analyzer=analyzer, researcher=researcher,
+                           refiner=refiner, judge=judge)
+
+    # Act
+    run_pipeline(backends, candidate, idea_text="идея",
+                 run_dir=tmp_path / "run-1", resume=False)
+
+    # Assert
+    assert len(analyzer.calls) == 1
+    assert analyzer.calls[0]["schema"] is AnalyzerOutput
+    assert len(researcher.calls) == 1
+    assert researcher.calls[0]["web_search"] is True
+    assert len(refiner.calls) == 1
+    assert len(judge.calls) == 1
+
+
+def test_pipeline_sums_usage_of_all_backends(candidate, tmp_path):
+    """Счётчик у каждого бэкенда свой — в state должна лечь общая сумма."""
+    # Arrange
+    run_dir = tmp_path / "run-1"
+    cheap = FakeLLM([analyzer_out(high("A1")), refiner_out("версия 1", "A1"),
+                     make_judge(delta=2.0)],
+                    usage=ApiUsage(input_tokens=100, output_tokens=10,
+                                   web_searches=0))
+    searching = FakeLLM([research_out(("A1", "confirmed"))],
+                        usage=ApiUsage(input_tokens=20, output_tokens=5,
+                                       web_searches=3))
+    backends = as_backends(cheap, researcher=searching)
+
+    # Act
+    state = run_pipeline(backends, candidate, idea_text="идея",
+                         run_dir=run_dir, resume=False)
+
+    # Assert
+    assert state.api_usage == ApiUsage(input_tokens=120, output_tokens=15,
+                                       web_searches=3)
+    assert load_state(run_dir).api_usage.web_searches == 3
+
+
+# --- Researcher обязан реально искать (ТЗ §4) --------------------------------
+
+def test_pipeline_retries_researcher_when_no_search_was_performed(candidate,
+                                                                  tmp_path):
+    searching = FakeLLM([SearchNotPerformed("поиск не выполнен"),
+                         research_out(("A1", "confirmed"))])
+    backends = as_backends(FakeLLM([analyzer_out(high("A1")),
+                                    refiner_out("версия 1", "A1"),
+                                    make_judge(delta=2.0)]),
+                           researcher=searching)
+
+    state = run_pipeline(backends, candidate, idea_text="идея",
+                         run_dir=tmp_path / "run-1", resume=False)
+
+    assert len(searching.calls) == 2
+    assert state.assumptions[0].status == "confirmed"
+
+
+def test_pipeline_fails_step_when_search_never_happens(candidate, tmp_path):
+    """Исчерпав попытки, шаг падает: выдуманный источник в отчёте хуже отказа."""
+    searching = FakeLLM([SearchNotPerformed("поиск не выполнен")] * 3)
+    backends = as_backends(FakeLLM([analyzer_out(high("A1"))]),
+                           researcher=searching)
+
+    with pytest.raises(SearchNotPerformed):
+        run_pipeline(backends, candidate, idea_text="идея",
+                     run_dir=tmp_path / "run-1", resume=False)
+
+    assert len(searching.calls) == 3      # ровно RETRY_ATTEMPTS попыток
+
+
+# --- снапшот конфига старой формы (models:) ----------------------------------
+
+def test_resume_refuses_old_shape_config_snapshot(candidate, tmp_path):
+    """Прогон, начатый до сменных бэкендов, продолжать нечем: неизвестно,
+    какими бэкендами он шёл. Явный отказ вместо тихого продолжения."""
+    run_dir = tmp_path / "run-1"
+    save_state(RunState(run_id="run-1", candidate_id="c",
+                        config={"loop": LOOP.model_dump(),
+                                "models": {"analyzer": "claude-sonnet-5"}},
+                        original_idea="идея", last_completed_step="judge"),
+               run_dir)
+
+    with pytest.raises(ValueError) as exc:
+        run_pipeline(as_backends(FakeLLM([])), candidate, idea_text="идея",
+                     run_dir=run_dir, resume=True)
+
+    assert "report" in str(exc.value)
