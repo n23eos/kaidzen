@@ -1,6 +1,8 @@
 """Оркестратор поколений: промоция, слепота, остановки и возобновление."""
 import pytest
 
+from kaidzen import evolve
+
 from kaidzen.evolve import (STOP_MAX_GENERATIONS, STOP_PLATEAU, STOP_REQUESTED,
                             STAGE_GATED, STATUS_PROMOTED, STATUS_UNSTABLE,
                             EVAL_MAX_ITERATIONS, load_evolve_state, request_stop,
@@ -193,11 +195,11 @@ def test_failed_run_marks_idea_and_two_failures_reject_candidate(tmp_path):
     state = start(ctx, env)
 
     broken = state.generations[0].challengers[0]
-    assert broken.candidate_id == "gen001-a"
+    assert broken.candidate_id.startswith("gen001-a")
     assert broken.status == STATUS_UNSTABLE
     assert sum(1 for r in broken.runs if not r.ok) >= 2
     assert broken.win_rate is None          # до попарок дело не дошло
-    assert state.champion_id == "gen001-b"  # второй челленджер прошёл
+    assert state.champion_id.startswith("gen001-b")  # второй челленджер прошёл
 
 
 def test_unstable_champion_stops_with_a_clear_error(tmp_path):
@@ -222,7 +224,7 @@ def test_mutation_touching_three_roles_is_discarded(tmp_path):
     assert gen.challengers == []
     assert len(gen.discarded) == 2
     assert "не больше 2" in gen.discarded[0]
-    assert not (env.candidates_root / "gen001-a").exists()
+    assert not list(env.candidates_root.glob("gen001-a*"))
 
 
 def test_invalid_mutation_is_discarded_and_leaves_nothing_on_disk(tmp_path):
@@ -235,7 +237,7 @@ def test_invalid_mutation_is_discarded_and_leaves_nothing_on_disk(tmp_path):
     state = start(ctx, env)
 
     assert state.generations[0].challengers == []
-    assert not (env.candidates_root / "gen001-a").exists()
+    assert not list(env.candidates_root.glob("gen001-a*"))
     assert state.champion_id == CHAMPION_ID
 
 
@@ -320,10 +322,32 @@ def test_resume_does_not_repeat_a_finished_mutation(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         start(make_ctx(env, FakeMeta(interrupt_after=2), FakePipeline()), env)
     interrupted = load_evolve_state(env.evolve_dir).generations[0]
-    assert [c.candidate_id for c in interrupted.challengers] == ["gen001-a"]
+    assert [c.candidate_id.split("-")[1] for c in interrupted.challengers] == ["a"]
 
     state = run_evolve(make_ctx(env, FakeMeta(comparison="champion"),
                                 FakePipeline()), resume=True)
     gen = state.generations[0]
-    assert [c.candidate_id for c in gen.challengers] == ["gen001-a", "gen001-b"]
+    assert [c.candidate_id.split("-")[1] for c in gen.challengers] == ["a", "b"]
     assert gen.discarded == []
+
+
+# --- коллизия имён между evolve-прогонами (поймано вживую) ------------------
+
+def test_candidate_id_is_scoped_to_the_evolve_run():
+    """Второй прогон не должен упираться в кандидатов, созданных первым."""
+    first = evolve._candidate_id(1, 0, "2026-08-03-045447-business")
+    second = evolve._candidate_id(1, 0, "2026-08-03-140831-business")
+    assert first != second
+    assert first.startswith("gen001-a")
+
+
+def test_candidate_id_is_stable_within_one_run():
+    """Resume обязан попасть в то же имя, иначе потомок задвоится."""
+    once = evolve._candidate_id(2, 1, "2026-08-03-140831-business")
+    twice = evolve._candidate_id(2, 1, "2026-08-03-140831-business")
+    assert once == twice
+    assert once.startswith("gen002-b")
+
+
+def test_candidate_id_survives_evolve_id_without_digits():
+    assert evolve._candidate_id(1, 0, "прогон") .startswith("gen001-a")

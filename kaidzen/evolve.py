@@ -59,6 +59,7 @@ EVAL_CONCURRENCY = 2
 # Урезанный лимит итераций на eval (ТЗ §4.6): поколение из десятка прогонов
 # иначе идёт часами. Лимит только опускается, поднять его мутацией нельзя.
 EVAL_MAX_ITERATIONS = 4
+RUN_STAMP_LENGTH = 6      # метка прогона в имени потомка: хвост времени из evolve_id
 # столько упавших прогонов — и кандидат считается нестабильным
 FAILURE_LIMIT = 2
 
@@ -398,7 +399,7 @@ def _mutate(ctx: EvolveContext, state: EvolveState,
             continue        # эту попытку уже сделали до прерывания
         proposal = run_mutator(ctx.meta_backend, ctx.meta, champion,
                                diagnosis=diagnosis, attempt=attempt)
-        candidate_id = f"gen{gen.number:03d}-{ascii_lowercase[attempt]}"
+        candidate_id = _candidate_id(gen.number, attempt, state.evolve_id)
         try:
             target = write_candidate(parent_dir=Path(state.champion_dir),
                                      root=ctx.candidates_root,
@@ -461,6 +462,21 @@ def _challenger_wins(ctx: EvolveContext, champion_report: str,
     second = run_meta_judge(ctx.meta_backend, ctx.meta,
                             report_a=challenger_report, report_b=champion_report)
     return first.winner == "B" and second.winner == "A"
+
+
+def _candidate_id(generation: int, attempt: int, evolve_id: str) -> str:
+    """Имя потомка, уникальное между прогонами и стабильное внутри одного.
+
+    Без метки прогона второй запуск evolve упирается в кандидатов, созданных
+    первым, и отбрасывает обе мутации — поколение проходит впустую, потратив
+    прогоны чемпиона. Поймано на первом полном прогоне бенчмарка.
+
+    Метка берётся из evolve_id детерминированно, иначе resume не попал бы в то
+    же имя и создал бы дубль потомка.
+    """
+    digits = "".join(c for c in evolve_id if c.isdigit())
+    stamp = digits[-RUN_STAMP_LENGTH:] if digits else "x"
+    return f"gen{generation:03d}-{ascii_lowercase[attempt]}-{stamp}"
 
 
 def _gate(ctx: EvolveContext, state: EvolveState,

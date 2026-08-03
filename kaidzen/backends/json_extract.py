@@ -47,7 +47,11 @@ def _slice_outer_braces(text: str) -> str:
 
 def _load_object(text: str) -> dict[str, Any]:
     try:
-        value = json.loads(text)
+        # strict=False пропускает настоящие переводы строк и табы внутри
+        # строковых значений. Модель их ставит регулярно — на живом прогоне
+        # так потерялась целая идея бенчмарка. Смысла в отказе нет: экранирование
+        # переноса нас не интересует, интересует содержимое.
+        value = json.loads(text, strict=False)
     except json.JSONDecodeError as e:
         raise JsonExtractionError(f"ответ не разбирается как JSON: {e}") from e
     if not isinstance(value, dict):

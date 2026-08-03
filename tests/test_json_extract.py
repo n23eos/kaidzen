@@ -29,3 +29,14 @@ def test_text_without_object_raises():
 def test_json_array_is_not_an_object():
     with pytest.raises(JsonExtractionError):
         extract_json_object("[1, 2, 3]")
+
+
+def test_raw_newline_inside_string_is_tolerated():
+    """Модель ставит настоящий перевод строки внутрь значения — поймано вживую:
+    'Invalid control character at: line 1 column 2703'."""
+    text = '{"claim":"первая строка\nвторая строка","n":1}'
+    assert extract_json_object(text)["n"] == 1
+
+
+def test_raw_tab_inside_string_is_tolerated():
+    assert extract_json_object('{"a":"до\tпосле"}')["a"] == "до\tпосле"

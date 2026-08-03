@@ -99,17 +99,29 @@ class FakePipeline:
         self.calls.append((candidate.candidate_id, idea))
         if self.interrupt_after is not None and len(self.calls) > self.interrupt_after:
             raise KeyboardInterrupt("прогон прерван пользователем")
-        if candidate.candidate_id in self.fails:
+        # имя потомка несёт метку прогона, поэтому сравниваем по префиксу
+        if any(candidate.candidate_id.startswith(f) for f in self.fails):
             raise RuntimeError("бэкенд лёг")
         state = make_run_state(candidate.candidate_id, run_dir.name,
                                self._rate(candidate.candidate_id, idea))
         save_state(state, run_dir)
         return state
 
+    @staticmethod
+    def _lookup(table: dict, candidate_id: str):
+        """Имя потомка несёт метку прогона — ищем по префиксу, не по равенству."""
+        for key, value in table.items():
+            if candidate_id.startswith(key):
+                return value
+        return None
+
     def _rate(self, candidate_id: str, idea: str) -> float:
-        if idea == HOLDOUT_IDEA and candidate_id in self.holdout_closed:
-            return self.holdout_closed[candidate_id]
-        return self.closed.get(candidate_id, self.default)
+        if idea == HOLDOUT_IDEA:
+            found = self._lookup(self.holdout_closed, candidate_id)
+            if found is not None:
+                return found
+        found = self._lookup(self.closed, candidate_id)
+        return self.default if found is None else found
 
 
 def make_run_state(candidate_id: str, run_id: str, closed_rate: float) -> RunState:
