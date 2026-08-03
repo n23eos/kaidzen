@@ -761,7 +761,7 @@ def test_meta_judge_temperature_is_deterministic(candidate):
 
 **Слепота попарок.** Каждая пара сравнивается дважды с перестановкой: (champion, challenger) и (challenger, champion). Совпали — победа засчитана; разошлись — ничья. Это гасит позиционную предвзятость судьи.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # tests/test_evolve.py — ключевые кейсы (полные фикстуры пишутся при реализации)
@@ -808,9 +808,9 @@ def test_champion_runs_are_reused_from_cache(...):
     """Чемпион уже прогонялся на этих идеях — берём результат, не гоняем снова."""
 ```
 
-- [ ] **Step 2: Run — FAIL**
+- [x] **Step 2: Run — FAIL**
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `EvolveState` (pydantic, атомарная запись как у `RunState`): champion_id, generation, кандидаты со статусами и метриками, история решений Gate, чекпоинты, флаг мягкой остановки, ссылки на каталоги прогонов.
 
@@ -818,9 +818,9 @@ def test_champion_runs_are_reused_from_cache(...):
 
 Кэш прогонов чемпиона: ключ — (candidate_id, путь идеи); при попадании берётся готовый `state.json`, прогон не повторяется.
 
-- [ ] **Step 4: Run — PASS**
+- [x] **Step 4: Run — PASS**
 
-- [ ] **Step 5: Commit** — `feat: оркестратор поколений мета-лупа`
+- [x] **Step 5: Commit** — `feat: оркестратор поколений мета-лупа`
 
 ---
 
@@ -833,7 +833,7 @@ def test_champion_runs_are_reused_from_cache(...):
 
 Третья защита от Гудхарта. Каждые K поколений (default 3) evolve останавливается, гоняет текущего и предыдущего чемпиона на **holdout**-идеях и пишет сравнительную сводку. Дальше ждёт `checkpoint --approve` или `--reject`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 def test_checkpoint_summary_contains_both_reports_and_metrics(...):
@@ -844,7 +844,7 @@ def test_reject_rolls_champion_back_to_previous(...):
 def test_evolve_refuses_to_continue_while_checkpoint_pending(...):
 ```
 
-- [ ] **Step 2–5:** реализация, тесты, коммит `feat: чекпоинты человека с проверкой на holdout`
+- [x] **Step 2–5:** реализация, тесты, коммит `feat: чекпоинты человека с проверкой на holdout`
 
 ---
 
