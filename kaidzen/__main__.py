@@ -1,7 +1,13 @@
-"""CLI Kaidzen: run / resume / report.
+"""CLI Kaidzen: run / resume / report + evolve / evolve-resume / evolve-stop /
+checkpoint.
 
 Точка входа для человека за терминалом: прогон стоит денег и идёт минутами,
 поэтому команды печатают ход дела и валятся с понятным текстом, а не трейсбеком.
+
+Мета-луп (Уровень 2) добавляет к этому вторую шкалу времени: поколение — это
+около десятка прогонов Уровня 1, то есть десятки минут. Поэтому у evolve те же
+два свойства, что и у run: живой прогресс в stdout и понятная финальная сводка.
+Сам он никогда не стартует: ни демона, ни крона — только эти команды (ТЗ §4.5).
 """
 from __future__ import annotations
 
@@ -15,12 +21,20 @@ from pydantic import BaseModel
 
 from kaidzen.backends.base import BackendError
 from kaidzen.backends.registry import build_backends
+from kaidzen.benchmark import Benchmark, BenchmarkEmpty, load_benchmark
 from kaidzen.candidate import (CHAMPION_PREFIX, REPORTER_ROLE, Candidate,
                                backends_by_role, load_candidate)
+from kaidzen.checkpoint import NO_DATA, pending_checkpoint
+from kaidzen.evolve import (EVAL_CONCURRENCY, MAX_GENERATIONS,
+                            STOP_CHECKPOINT_REJECTED, SUMMARY_FILE,
+                            EvolveContext, EvolveState, approve_checkpoint,
+                            load_evolve_state, reject_checkpoint, request_stop,
+                            run_evolve)
 from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
                                   STEP_RESEARCHER, STEP_WARNING,
                                   _loop_from_state, run_pipeline, total_usage)
 from kaidzen.report import build_report
+from kaidzen.roles.meta import MetaConfig, build_meta_backend
 from kaidzen.state import RunState, load_state, save_state
 
 # пересказ готового текста без домысливания
@@ -34,6 +48,11 @@ SUMMARY_SYSTEM = (
 RUN_DIR_TIMESTAMP_FORMAT = "%Y-%m-%d-%H%M%S"
 CANDIDATES_ROOT = Path("candidates")
 RUNS_ROOT = Path("runs")
+BENCHMARK_ROOT = Path("benchmark")
+EVOLVE_ROOT = Path("evolve")
+# префикс строк прогресса мета-лупа: сообщения о поколении не должны путаться
+# со строками ролей Уровня 1, которые печатает вложенный прогон
+EVOLVE_PREFIX = "evolve"
 REPORT_FILENAME = "report.md"
 DOMAINS = ("generic", "business", "games")
 DEFAULT_DOMAIN = "generic"
@@ -70,6 +89,15 @@ def make_run_dir(*, runs_root: Path, idea_path: Path, now_str: str) -> Path:
     пользователь пишет идеи по-русски и должен узнавать свой прогон в списке.
     """
     return runs_root / f"{now_str}-{slugify(idea_path.stem)}"
+
+
+def make_evolve_dir(*, evolve_root: Path, domain: str, now_str: str) -> Path:
+    """Путь каталога evolve-прогона: <evolve_root>/<время>-<домен>.
+
+    Каталог не создаётся — функция чистая, как и make_run_dir. Домен в имени,
+    а не слаг идеи: evolve-прогон гоняет весь бенчмарк домена, а не одну идею.
+    """
+    return evolve_root / f"{now_str}-{domain}"
 
 
 def slugify(text: str) -> str:
@@ -339,7 +367,196 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(f"Отчёт пересобран: {_write_report(state, run_dir, REBUILT_SUMMARY)}")
 
 
-COMMANDS = {"run": cmd_run, "resume": cmd_resume, "report": cmd_report}
+# --- вывод хода эволюции ---------------------------------------------------
+
+def print_evolve_event(message: str) -> None:
+    """Один шаг поколения в stdout.
+
+    Передаётся в EvolveContext как on_event. Тексты собирает сам оркестратор —
+    он единственный знает, что именно сейчас решилось: какой кандидат на какой
+    идее, сколько попарок выиграно, что и почему сказал Gate. CLI их только
+    печатает, не переформулируя, иначе причина решения Gate потерялась бы
+    по дороге. Поколение идёт десятки минут, и молчание в терминале
+    неотличимо от зависания.
+    """
+    print(f"[{EVOLVE_PREFIX}] {message}")
+
+
+def _print_evolve_start(evolve_dir: Path, benchmark: Benchmark, meta: MetaConfig,
+                        *, champion_id: str, generations: int,
+                        concurrency: int) -> None:
+    print(f"Эволюция: {evolve_dir.name}")
+    print(f"Домен: {benchmark.domain}, чемпион: {champion_id}")
+    print(f"Бенчмарк: {len(benchmark.train)} идей train, "
+          f"{len(benchmark.holdout)} holdout")
+    _print_meta_backend(meta)
+    print(f"Поколений: до {generations}, параллельных прогонов: {concurrency}")
+
+
+def _print_meta_backend(meta: MetaConfig) -> None:
+    """На чём ходят мета-роли. Ключи не печатаются — только тип и модели."""
+    print(f"  мета-бэкенд: {meta.backend.get('type')}")
+    print(f"  диагност и мутатор: {meta.deep_model}")
+    print(f"  слепой судья: {meta.judge_model}")
+
+
+def _print_evolve_finish(state: EvolveState, evolve_dir: Path) -> None:
+    promoted = [gen.promoted_id for gen in state.generations if gen.promoted_id]
+    print(f"Остановка: {state.stop_reason}")
+    print(f"Поколений пройдено: {state.generation}")
+    print(f"Промоций: {len(promoted)}"
+          + (f" ({', '.join(promoted)})" if promoted else ""))
+    print(f"Чемпион: {state.champion_id}")
+    print(f"Сводка: {evolve_dir / SUMMARY_FILE}")
+    _print_pending_hint(state, evolve_dir)
+
+
+def _print_pending_hint(state: EvolveState, evolve_dir: Path) -> None:
+    """Незакрытый чекпоинт — не авария, а ожидание человека: скажем, что делать."""
+    record = pending_checkpoint(state)
+    if record is None:
+        return
+    print(f"Ждёт решения человека: {record.path}")
+    print(f"Прочитать и решить: python -m kaidzen checkpoint {evolve_dir}")
+
+
+# --- шаги команд эволюции --------------------------------------------------
+
+def _load_benchmark(domain: str) -> Benchmark:
+    try:
+        return load_benchmark(BENCHMARK_ROOT, domain=domain)
+    except BenchmarkEmpty as e:
+        sys.exit(f"Эволюционировать не на чем: {e}. Положите туда несколько "
+                 f"markdown-файлов с идеями и повторите.")
+
+
+def _evolve_context(evolve_dir: Path, benchmark: Benchmark, meta: MetaConfig,
+                    concurrency: int) -> EvolveContext:
+    """Контекст поколения. Бэкенд мета-уровня строится здесь, до первого вызова:
+    ключи требуются только те, что объявил сам мета-конфиг, а на подписке — ни
+    одного."""
+    try:
+        backend = build_meta_backend(meta)
+    except BackendError as e:
+        sys.exit(f"Не удалось подготовить бэкенд мета-уровня: {e}")
+    return EvolveContext(evolve_dir=evolve_dir, candidates_root=CANDIDATES_ROOT,
+                         benchmark=benchmark, meta_backend=backend, meta=meta,
+                         concurrency=concurrency, on_event=print_evolve_event)
+
+
+def _refuse_resume_while_checkpoint_pending(state: EvolveState,
+                                            evolve_dir: Path) -> None:
+    """Пока чекпоинт висит, поколения не идут — это решает человек, не CLI."""
+    record = pending_checkpoint(state)
+    if record is None:
+        return
+    sys.exit(f"Поколение {record.generation} ждёт решения человека: "
+             f"{record.path}. Сначала прочитайте сводку и решите: "
+             f"python -m kaidzen checkpoint {evolve_dir} --approve | --reject")
+
+
+# --- команды эволюции ------------------------------------------------------
+
+def cmd_evolve(args: argparse.Namespace) -> None:
+    benchmark = _load_benchmark(args.domain)
+    champion_dir = resolve_candidate_dir(candidates_root=CANDIDATES_ROOT,
+                                         domain=args.domain).resolve()
+    evolve_dir = make_evolve_dir(
+        evolve_root=EVOLVE_ROOT, domain=args.domain,
+        now_str=datetime.now().strftime(RUN_DIR_TIMESTAMP_FORMAT))
+    evolve_dir.mkdir(parents=True, exist_ok=True)
+    meta = MetaConfig()
+    ctx = _evolve_context(evolve_dir, benchmark, meta, args.concurrency)
+    _print_evolve_start(evolve_dir, benchmark, meta,
+                        champion_id=champion_dir.name,
+                        generations=args.generations,
+                        concurrency=args.concurrency)
+    state = run_evolve(ctx, champion_dir=champion_dir,
+                       max_generations=args.generations)
+    _print_evolve_finish(state, evolve_dir)
+
+
+def cmd_evolve_resume(args: argparse.Namespace) -> None:
+    """Продолжение evolve-прогона.
+
+    Лимиты берутся из состояния, а не из флагов — тот же контракт, что у
+    resume Уровня 1: прогон, начатый на двух поколениях, не должен получить
+    пять только потому, что его продолжили другой командой.
+    """
+    evolve_dir = Path(args.evolve_dir)
+    saved = load_evolve_state(evolve_dir)
+    _refuse_resume_while_checkpoint_pending(saved, evolve_dir)
+    benchmark = _load_benchmark(saved.domain)
+    meta = MetaConfig()
+    ctx = _evolve_context(evolve_dir, benchmark, meta, EVAL_CONCURRENCY)
+    _print_evolve_start(evolve_dir, benchmark, meta,
+                        champion_id=saved.champion_id,
+                        generations=saved.max_generations,
+                        concurrency=EVAL_CONCURRENCY)
+    state = run_evolve(ctx, resume=True)
+    _print_evolve_finish(state, evolve_dir)
+
+
+def cmd_evolve_stop(args: argparse.Namespace) -> None:
+    """Мягкая остановка: флаг на диске, который оркестратор читает на границе
+    поколений. Жёстко бросать поколение нельзя — его eval-прогоны уже оплачены
+    стенными часами."""
+    evolve_dir = Path(args.evolve_dir)
+    state = load_evolve_state(evolve_dir)
+    request_stop(evolve_dir)
+    print(f"Мягкая остановка запрошена: {state.evolve_id}")
+    print("Поколение в работе дозавершится — уже сделанные прогоны не пропадут; "
+          "новое не начнётся.")
+    print(f"Продолжить позже: python -m kaidzen evolve-resume {evolve_dir}")
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> None:
+    evolve_dir = Path(args.evolve_dir)
+    if args.approve:
+        _approve_checkpoint(evolve_dir)
+    elif args.reject:
+        _reject_checkpoint(evolve_dir)
+    else:
+        _show_checkpoint(evolve_dir)
+
+
+def _show_checkpoint(evolve_dir: Path) -> None:
+    """Без флага решение не принимается: сначала человек читает сводку."""
+    state = load_evolve_state(evolve_dir)
+    record = pending_checkpoint(state)
+    if record is None:
+        print(f"Незакрытых чекпоинтов нет. Чемпион: {state.champion_id}")
+        return
+    previous = record.previous_champion_id or NO_DATA
+    print(f"Чекпоинт поколения {record.generation} ждёт решения.")
+    print(f"Сравниваются на holdout-идеях: {previous} (предыдущий чемпион) "
+          f"и {record.champion_id} (текущий).")
+    if record.overfit:
+        print("Похоже на подгонку под бенчмарк: на train лучше, на holdout — нет.")
+    print(f"Сводка: {record.path}")
+    print(f"Решение: python -m kaidzen checkpoint {evolve_dir} "
+          f"--approve | --reject")
+
+
+def _approve_checkpoint(evolve_dir: Path) -> None:
+    record = approve_checkpoint(evolve_dir)
+    print(f"Чекпоинт поколения {record.generation} принят: "
+          f"чемпион {record.champion_id} остаётся.")
+    print(f"Продолжить: python -m kaidzen evolve-resume {evolve_dir}")
+
+
+def _reject_checkpoint(evolve_dir: Path) -> None:
+    """Отклонение откатывает чемпиона и заканчивает evolve-прогон."""
+    record = reject_checkpoint(evolve_dir)
+    state = load_evolve_state(evolve_dir)
+    print(f"Чекпоинт поколения {record.generation} отклонён: "
+          f"чемпион откачен на {state.champion_id}.")
+    print(f"Evolve-прогон завершён (причина: {STOP_CHECKPOINT_REJECTED}).")
+
+
+COMMANDS = {"run": cmd_run, "resume": cmd_resume, "report": cmd_report,
+            "evolve": cmd_evolve, "evolve-resume": cmd_evolve_resume,
+            "evolve-stop": cmd_evolve_stop, "checkpoint": cmd_checkpoint}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -363,7 +580,40 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report",
                             help="Пересобрать report.md без обращения к API.")
     report.add_argument("run_dir", help="Каталог прогона со state.json.")
+    _add_evolve_commands(sub)
     return parser
+
+
+def _add_evolve_commands(sub) -> None:
+    """Команды мета-лупа. Ни одна из них не запускает эволюцию сама по себе:
+    evolve отрабатывает заказанные поколения и выходит (ТЗ §4.5)."""
+    evolve = sub.add_parser(
+        "evolve", help="Эволюционировать кандидатов домена на бенчмарке.")
+    evolve.add_argument("--domain", choices=DOMAINS, default=DEFAULT_DOMAIN,
+                        help="Домен: из него берутся чемпион и идеи бенчмарка.")
+    evolve.add_argument("--generations", type=int, default=MAX_GENERATIONS,
+                        help="Сколько поколений прогнать максимум.")
+    evolve.add_argument("--concurrency", type=int, default=EVAL_CONCURRENCY,
+                        help="Сколько eval-прогонов идут параллельно.")
+
+    resume = sub.add_parser("evolve-resume",
+                            help="Продолжить прерванный evolve-прогон.")
+    resume.add_argument("evolve_dir", help="Каталог evolve-прогона со state.json.")
+
+    stop = sub.add_parser(
+        "evolve-stop",
+        help="Попросить остановиться: поколение в работе дозавершится.")
+    stop.add_argument("evolve_dir", help="Каталог evolve-прогона со state.json.")
+
+    checkpoint = sub.add_parser(
+        "checkpoint", help="Показать или закрыть чекпоинт evolve-прогона.")
+    checkpoint.add_argument("evolve_dir",
+                            help="Каталог evolve-прогона со state.json.")
+    decision = checkpoint.add_mutually_exclusive_group()
+    decision.add_argument("--approve", action="store_true",
+                          help="Согласиться с текущим чемпионом.")
+    decision.add_argument("--reject", action="store_true",
+                          help="Откатить чемпиона на предыдущего.")
 
 
 def main(argv: list[str] | None = None) -> None:
