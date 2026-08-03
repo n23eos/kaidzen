@@ -139,12 +139,18 @@ def test_web_search_with_searches_succeeds_and_counts(monkeypatch):
     assert calls[0]["options"].max_turns > 1
 
 
-def test_no_tools_and_single_turn_without_search(monkeypatch):
+def test_no_tools_without_search(monkeypatch):
     backend, calls = make_backend(monkeypatch, [answer(GOOD_JSON)])
     call(backend)
     assert calls[0]["options"].allowed_tools == []
     assert calls[0]["options"].tools == []
-    assert calls[0]["options"].max_turns == 1
+
+
+def test_turn_budget_leaves_room_even_without_search(monkeypatch):
+    """max_turns=1 SDK считает исчерпанным ходом и падает — поймано на прогоне."""
+    backend, calls = make_backend(monkeypatch, [answer(GOOD_JSON)])
+    call(backend)
+    assert calls[0]["options"].max_turns > 1
 
 
 def test_declares_web_search_capability():

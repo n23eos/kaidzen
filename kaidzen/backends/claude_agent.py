@@ -21,9 +21,10 @@ from kaidzen.backends.json_extract import (JsonExtractionError,
 T = TypeVar("T", bound=BaseModel)
 
 WEB_SEARCH_TOOL = "WebSearch"
-# один ход без поиска; с поиском нужен запас на серию запросов и ответ
-TURNS_WITHOUT_SEARCH = 1
-TURNS_WITH_SEARCH = 8
+# max_turns=1 SDK трактует как «ход исчерпан» и падает с ошибкой ещё до ответа —
+# поймано на живом прогоне. Запас нужен даже там, где инструментов нет.
+TURNS_WITHOUT_SEARCH = 4
+TURNS_WITH_SEARCH = 12
 
 JSON_INSTRUCTION = (
     "Верни СТРОГО один JSON-объект по схеме ниже. Без markdown-ограды, "
