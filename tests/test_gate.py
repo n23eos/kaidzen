@@ -1,4 +1,4 @@
-from kaidzen.gate import MIN_WIN_RATE, GateDecision, decide
+from kaidzen.gate import MAX_COST_GROWTH, MIN_WIN_RATE, GateDecision, decide
 from kaidzen.metrics import RunMetrics
 
 
@@ -157,4 +157,48 @@ def test_rejects_when_absolute_closed_drops():
 
 def test_small_registry_change_is_not_treated_as_shrinking():
     d = decide(champion=shrunk(10, 6), challenger=shrunk(9, 6), win_rate=0.8)
+    assert d.promote is True
+
+
+# --- эффективность как цель (ТЗ памяти эволюции §4) -------------------------
+
+def costly(tokens, runs=5, **kw):
+    """Кандидат с заданным расходом выходных токенов на пачку прогонов."""
+    return m(**kw).model_copy(update={"runs": runs, "output_tokens": tokens})
+
+
+def test_rejects_challenger_that_bought_quality_at_triple_the_cost():
+    """Улучшение втрое дороже — это обмен, и решать его должен человек."""
+    d = decide(champion=costly(10_000), challenger=costly(30_000, closed=0.9),
+               win_rate=0.9)
+    assert d.promote is False
+    assert "output_tokens" in d.reason
+
+
+def test_cheaper_and_better_challenger_promotes():
+    d = decide(champion=costly(10_000), challenger=costly(6_000, closed=0.9),
+               win_rate=0.9)
+    assert d.promote is True
+
+
+def test_modest_growth_under_the_ceiling_is_allowed():
+    d = decide(champion=costly(10_000), challenger=costly(14_000), win_rate=0.8)
+    assert d.promote is True
+
+
+def test_cost_ceiling_counts_tokens_per_run_not_per_batch():
+    """Челленджер прогнан по большему числу идей — это не удорожание."""
+    d = decide(champion=costly(10_000, runs=2), challenger=costly(25_000, runs=5),
+               win_rate=0.8)
+    assert d.promote is True
+
+
+def test_champion_without_token_stats_gives_no_cost_regression():
+    d = decide(champion=costly(0), challenger=costly(50_000), win_rate=0.8)
+    assert d.promote is True
+
+
+def test_cost_ceiling_exactly_at_the_limit_passes():
+    d = decide(champion=costly(10_000),
+               challenger=costly(int(10_000 * MAX_COST_GROWTH)), win_rate=0.8)
     assert d.promote is True

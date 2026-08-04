@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from kaidzen.metrics import RunMetrics
+from kaidzen.metrics import RunMetrics, output_tokens_per_run
 
 MIN_WIN_RATE = 0.55          # доля побед в попарках
 MAX_REGRESSION = 0.10        # относительное проседание метрики, которое терпим
 MAX_REGISTRY_SHRINK = 0.20   # насколько можно ужать реестр допущений «бесплатно»
+MAX_COST_GROWTH = 1.5        # во сколько раз можно подорожать по выходным токенам
 
 
 class GateDecision(BaseModel):
@@ -73,6 +74,19 @@ def _gamed_the_denominator(champion: RunMetrics, challenger: RunMetrics) -> bool
     return challenger.high_closed <= champion.high_closed
 
 
+def _too_expensive(champion: RunMetrics, challenger: RunMetrics) -> bool:
+    """Кандидат купил улучшение непропорциональной ценой.
+
+    Просадка качества и удорожание блокируют промоцию одинаково: кандидат,
+    ставший лучше втрое большей ценой, — не улучшение, а обмен. Такой обмен
+    должен утверждать человек на чекпоинте, а не Gate молча.
+    """
+    before = output_tokens_per_run(champion)
+    if before <= 0:
+        return False
+    return output_tokens_per_run(challenger) > before * MAX_COST_GROWTH
+
+
 def _broken_metrics(champion: RunMetrics, challenger: RunMetrics) -> list[str]:
     checks = [
         ("assumptions_closed_rate", _regressed(champion.assumptions_closed_rate,
@@ -86,6 +100,8 @@ def _broken_metrics(champion: RunMetrics, challenger: RunMetrics) -> list[str]:
                                    _source_rate(challenger))),
         # partial растёт — значит цикл стал чаще хеджировать вместо вердикта
         ("partial_rate", _grew(champion.partial_rate, challenger.partial_rate)),
+        (f"output_tokens вырос больше чем в {MAX_COST_GROWTH:g} раза",
+         _too_expensive(champion, challenger)),
     ]
     return [name for name, bad in checks if bad]
 

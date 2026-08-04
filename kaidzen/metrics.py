@@ -35,6 +35,16 @@ def _rate(part: int, whole: int) -> float:
     return part / whole if whole else 0.0
 
 
+def output_tokens_per_run(m: RunMetrics) -> float:
+    """Расход на один прогон, а не на пачку.
+
+    Кандидаты сравниваются по разному числу успешных прогонов (упавший прогон
+    в агрегат не попадает), и сумма токенов сама по себе сравнивала бы не
+    жадность кандидата, а размер его выборки.
+    """
+    return m.output_tokens / m.runs if m.runs else float(m.output_tokens)
+
+
 def run_metrics(state: RunState) -> RunMetrics:
     """Метрики одного прогона. Состояние только читается, не меняется."""
     high = [a for a in state.assumptions if a.criticality == "high"]
