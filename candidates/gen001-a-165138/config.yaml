@@ -40,10 +40,10 @@ roles:
     model: claude-sonnet-5
   refiner:
     backend: subscription
-    model: claude-opus-5
+    model: claude-sonnet-5
   judge:
     backend: subscription
-    model: claude-opus-5
+    model: claude-sonnet-5
   reporter:
     backend: subscription
     model: claude-sonnet-5
