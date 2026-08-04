@@ -38,8 +38,13 @@ from kaidzen.checkpoint import (CHECKPOINT_EVERY, STATUS_REJECTED as CHECKPOINT_
                                 make_checkpoint, pending_checkpoint)
 from kaidzen.checkpoint import approve as approve_state
 from kaidzen.checkpoint import reject as reject_state
+from kaidzen.evolution_log import (OUTCOME_DISCARDED, render_digest,
+                                   render_do_not_break)
+from kaidzen.evolve_memory import (build_record, load_memory, log_generation,
+                                   remember)
 from kaidzen.gate import decide
-from kaidzen.metrics import RunMetrics, aggregate, run_metrics
+from kaidzen.metrics import (RunMetrics, aggregate, output_tokens_per_run,
+                             run_metrics)
 from kaidzen.mutation import set_status, write_candidate
 from kaidzen.orchestrator import run_pipeline
 from kaidzen.report import build_report
@@ -120,6 +125,9 @@ class CandidateRecord(BaseModel):
     candidate_id: str
     candidate_dir: str
     rationale: str = ""
+    # какие роли тронул патч: журналу этого с диска не восстановить, а без
+    # него запись «что пробовали» бесполезна следующему прогону
+    roles_touched: list[str] = Field(default_factory=list)
     status: str = STATUS_PENDING
     runs: list[EvalRun] = Field(default_factory=list)
     metrics: RunMetrics | None = None
@@ -391,7 +399,9 @@ def _diagnose(ctx: EvolveContext, state: EvolveState,
             f"чемпион {record.candidate_id} не дал ни одного успешного прогона "
             f"на train — эволюционировать не от чего")
     diagnosis = run_diagnostician(ctx.meta_backend, ctx.meta,
-                                  metrics=record.metrics, reports=reports)
+                                  metrics=record.metrics, reports=reports,
+                                  memory=render_digest(
+                                      load_memory(ctx.candidates_root, state)))
     gen.weaknesses = list(diagnosis.weaknesses)
     gen.hypotheses = list(diagnosis.hypotheses)
     _event(ctx, f"диагноз: {len(gen.hypotheses)} гипотез")
@@ -403,12 +413,15 @@ def _mutate(ctx: EvolveContext, state: EvolveState,
     """Две попытки мутатора. Непринятая попытка пропускается, а не чинится."""
     champion = load_candidate(Path(state.champion_dir))
     diagnosis = _diagnosis_of(gen)
+    accepted = render_do_not_break(load_memory(ctx.candidates_root, state))
     for attempt in range(CHALLENGERS_PER_GENERATION):
         if attempt < gen.attempts_done:
             continue        # эту попытку уже сделали до прерывания
         proposal = run_mutator(ctx.meta_backend, ctx.meta, champion,
-                               diagnosis=diagnosis, attempt=attempt)
+                               diagnosis=diagnosis, attempt=attempt,
+                               do_not_break=accepted)
         candidate_id = _candidate_id(gen.number, attempt, state.evolve_id)
+        roles = sorted(proposal.prompts)
         try:
             target = write_candidate(parent_dir=Path(state.champion_dir),
                                      root=ctx.candidates_root,
@@ -416,11 +429,15 @@ def _mutate(ctx: EvolveContext, state: EvolveState,
                                      patch=to_patch(proposal))
         except (ValueError, FileNotFoundError) as e:
             gen.discarded.append(f"{candidate_id}: {e}")
+            remember(ctx.candidates_root, state, build_record(
+                state, gen, candidate_id=candidate_id, roles=roles,
+                hypothesis=proposal.rationale, outcome=OUTCOME_DISCARDED,
+                gate_reason=str(e)))
             _event(ctx, f"мутация {candidate_id} отброшена: {e}")
         else:
             gen.challengers.append(CandidateRecord(
                 candidate_id=candidate_id, candidate_dir=str(target),
-                rationale=proposal.rationale))
+                rationale=proposal.rationale, roles_touched=roles))
             _event(ctx, f"челленджер {candidate_id} записан")
         gen.attempts_done = attempt + 1
         _save(ctx, state)
@@ -505,11 +522,31 @@ def _gate(ctx: EvolveContext, state: EvolveState,
         record.gate_reason = decision.reason
         record.status = STATUS_PROMOTED if decision.promote else STATUS_REJECTED
         _event(ctx, f"{record.candidate_id}: {decision.reason}")
-        if decision.promote and (winner is None
-                                 or record.win_rate > winner.win_rate):
-            winner = record
+        if decision.promote:
+            winner = _better_challenger(winner, record)
     _apply_gate(ctx, state, gen, winner)
+    log_generation(ctx.candidates_root, state, gen)
     _advance(ctx, state, gen, STAGE_GATED)
+
+
+def _better_challenger(current: CandidateRecord | None,
+                       candidate: CandidateRecord) -> CandidateRecord:
+    """Кто из прошедших Gate становится чемпионом.
+
+    Сначала попарки, потом цена: при равном качестве дешевле значит лучше, и
+    без этого тай-брейка выбор между двумя одинаково успешными челленджерами
+    был бы произвольным — а расход токенов рос бы от поколения к поколению
+    просто потому, что его никто не выбирает.
+    """
+    if current is None:
+        return candidate
+    if candidate.win_rate != current.win_rate:
+        return candidate if candidate.win_rate > current.win_rate else current
+    return candidate if _cost(candidate) < _cost(current) else current
+
+
+def _cost(record: CandidateRecord) -> float:
+    return output_tokens_per_run(record.metrics) if record.metrics else 0.0
 
 
 def _apply_gate(ctx: EvolveContext, state: EvolveState, gen: GenerationRecord,
@@ -520,7 +557,7 @@ def _apply_gate(ctx: EvolveContext, state: EvolveState, gen: GenerationRecord,
             # прошёл Gate, но поколение продвигает одного: иначе непонятно,
             # чей вклад измеряет следующий диагноз
             record.status = STATUS_REJECTED
-            record.gate_reason += "; другой челленджер выиграл больше попарок"
+            record.gate_reason += f"; {_why_lost(winner, record)}"
         _write_meta_status(record)
     if winner is None:
         state.no_promotion_streak += 1
@@ -533,6 +570,13 @@ def _apply_gate(ctx: EvolveContext, state: EvolveState, gen: GenerationRecord,
     state.no_promotion_streak = 0
     _write_meta_status(winner, CHAMPION_META_STATUS)
     write_champion_pointer(state)
+
+
+def _why_lost(winner: CandidateRecord | None,
+              record: CandidateRecord) -> str:
+    if winner is None or winner.win_rate != record.win_rate:
+        return "другой челленджер выиграл больше попарок"
+    return "другой челленджер дешевле по токенам на прогон"
 
 
 def write_champion_pointer(state: EvolveState) -> None:

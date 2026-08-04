@@ -1,13 +1,21 @@
 """Оркестратор поколений: промоция, слепота, остановки и возобновление."""
+from types import SimpleNamespace
+
 import pytest
 
-from kaidzen import evolve
+from kaidzen import evolve, evolve_memory
 
 from kaidzen.evolve import (STOP_MAX_GENERATIONS, STOP_PLATEAU, STOP_REQUESTED,
                             STAGE_GATED, STATUS_PROMOTED, STATUS_UNSTABLE,
                             EVAL_MAX_ITERATIONS, load_evolve_state, request_stop,
                             run_evolve)
 from kaidzen.candidate import CHAMPION_PREFIX
+from kaidzen.metrics import RunMetrics
+from kaidzen.evolution_log import (OUTCOME_DISCARDED, OUTCOME_PROMOTED,
+                                   OUTCOME_REJECTED, OUTCOME_UNSTABLE,
+                                   load_records)
+from kaidzen.roles.meta.diagnostician import Diagnosis
+from kaidzen.roles.meta.mutator import MutationProposal
 from tests.evolve_fakes import (DOMAIN, FakeMeta, FakePipeline, make_ctx,
                                 make_env)
 
@@ -430,3 +438,209 @@ def test_failed_eval_run_does_not_break_on_missing_report(tmp_path):
     ctx = make_ctx(env, FakeMeta(), FakePipeline(fails={"gen001-a"}))
     state = run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
     assert state.generations[-1].challengers
+
+
+# --- память эволюции и эффективность ---------------------------------------
+
+def log_of(env):
+    return load_records(env.candidates_root, DOMAIN)
+
+
+def test_gate_writes_a_record_per_challenger(tmp_path):
+    """Каждая попытка мутации оставляет след, независимо от исхода."""
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"),
+                   FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.75))
+    state = start(ctx, env)
+
+    records = log_of(env)
+    assert len(records) == len(state.generations[0].challengers)
+    outcomes = {r.outcome for r in records}
+    assert OUTCOME_PROMOTED in outcomes and OUTCOME_REJECTED in outcomes
+    promoted = [r for r in records if r.outcome == OUTCOME_PROMOTED]
+    assert [r.candidate_id for r in promoted] == [state.champion_id]
+
+
+def test_record_carries_hypothesis_roles_and_deltas(tmp_path):
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"),
+                   FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.75))
+    state = start(ctx, env)
+
+    record = [r for r in log_of(env) if r.outcome == OUTCOME_PROMOTED][0]
+    assert record.hypothesis == "по гипотезе 1"
+    assert record.roles_touched == ["researcher"]
+    assert record.parent_id == CHAMPION_ID
+    assert record.evolve_id == state.evolve_id
+    assert record.win_rate == 1.0
+    assert record.comparable_ideas == TRAIN_IDEAS
+    assert record.metrics_delta["assumptions_closed_rate"] > 0
+    assert "output_tokens" in record.metrics_delta
+    assert record.gate_reason
+
+
+def test_discarded_mutation_is_recorded_too(tmp_path):
+    """Патч, не доехавший до диска, — тоже знание: не повторять."""
+    env = make_env(tmp_path)
+    bad = MutationProposal(prompts={"нет-такой-роли": "текст"}, rationale="замысел")
+    ctx = make_ctx(env, FakeMeta(comparison="challenger", proposal=bad),
+                   FakePipeline())
+    start(ctx, env)
+
+    records = log_of(env)
+    assert len(records) == 2
+    assert all(r.outcome == OUTCOME_DISCARDED for r in records)
+    assert all("нет-такой-роли" in r.gate_reason for r in records)
+    assert all(r.hypothesis == "замысел" for r in records)
+
+
+def test_unstable_candidate_is_recorded_as_unstable(tmp_path):
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"),
+                   FakePipeline(fails=["gen001-a"]))
+    start(ctx, env)
+
+    outcomes = {r.outcome for r in log_of(env)
+                if r.candidate_id.startswith("gen001-a")}
+    assert outcomes == {OUTCOME_UNSTABLE}
+
+
+def test_second_generation_appends_instead_of_overwriting(tmp_path):
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="champion"), FakePipeline())
+    start(ctx, env, generations=2)
+
+    records = log_of(env)
+    assert len(records) == 4
+    assert {r.generation for r in records} == {1, 2}
+
+
+def test_diagnostician_sees_the_log_of_the_previous_run(tmp_path):
+    """Второй evolve-прогон стартует уже не с нуля."""
+    env = make_env(tmp_path)
+    first = FakeMeta(comparison="champion")
+    start(make_ctx(env, first, FakePipeline()), env)
+
+    second_dir = tmp_path / "evolve" / "e2"
+    env2 = SimpleNamespace(**{**vars(env), "evolve_dir": second_dir})
+    second = FakeMeta(comparison="champion")
+    start(make_ctx(env2, second, FakePipeline()), env2)
+
+    diagnosis_calls = [c["user"] for c in second.calls
+                       if c["schema"] is Diagnosis]
+    assert diagnosis_calls and "Журнал эволюции" in diagnosis_calls[0]
+    assert "по гипотезе 1" in diagnosis_calls[0]
+    # первый прогон видеть было нечего
+    assert all("Журнал эволюции" not in c["user"] for c in first.calls
+               if c["schema"] is Diagnosis)
+
+
+def test_mutator_gets_the_do_not_break_list_of_earlier_findings(tmp_path):
+    env = make_env(tmp_path)
+    start(make_ctx(env, FakeMeta(comparison="challenger"),
+                   FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.75)), env)
+
+    second_dir = tmp_path / "evolve" / "e2"
+    env2 = SimpleNamespace(**{**vars(env), "evolve_dir": second_dir})
+    second = FakeMeta(comparison="champion")
+    start(make_ctx(env2, second, FakePipeline()), env2)
+
+    mutator_calls = [c["user"] for c in second.calls
+                     if c["schema"] is MutationProposal]
+    assert mutator_calls and "не ломать" in mutator_calls[0]
+
+
+def test_judge_never_sees_the_evolution_log(tmp_path):
+    """Слепота судьи держится и при полном журнале за спиной."""
+    env = make_env(tmp_path)
+    start(make_ctx(env, FakeMeta(comparison="challenger"),
+                   FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.75)), env)
+
+    second_dir = tmp_path / "evolve" / "e2"
+    env2 = SimpleNamespace(**{**vars(env), "evolve_dir": second_dir})
+    second = FakeMeta(comparison="challenger")
+    start(make_ctx(env2, second, FakePipeline()), env2)
+
+    assert log_of(env2)      # журнал непустой — есть чему утекать
+    for payload in second.comparison_payloads():
+        for leak in ("Журнал эволюции", "не ломать", "гипотез", "promoted"):
+            assert leak not in payload, f"судье утекло: {leak}"
+
+
+def test_tie_break_promotes_the_cheaper_challenger(tmp_path):
+    """Оба прошли Gate с равным win_rate — чемпионом становится дешёвый."""
+    env = make_env(tmp_path)
+    pipeline = FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.75,
+                            tokens={"gen001-a": 9_000, "gen001-b": 4_000},
+                            default_tokens=8_000)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"), pipeline)
+    state = start(ctx, env)
+
+    assert state.champion_id.startswith("gen001-b")
+    loser = [c for c in state.generations[0].challengers
+             if c.candidate_id != state.champion_id][0]
+    assert "дешевле" in loser.gate_reason
+
+
+def test_expensive_challenger_does_not_become_champion(tmp_path):
+    """Улучшение втрое большей ценой Gate не пропускает."""
+    env = make_env(tmp_path)
+    pipeline = FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.9,
+                            tokens={CHAMPION_ID: 5_000}, default_tokens=20_000)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"), pipeline)
+    state = start(ctx, env)
+
+    assert state.champion_id == CHAMPION_ID
+    assert all("output_tokens" in c.gate_reason
+               for c in state.generations[0].challengers)
+
+
+def test_cheaper_and_better_challenger_still_promotes(tmp_path):
+    env = make_env(tmp_path)
+    pipeline = FakePipeline(closed={CHAMPION_ID: 0.5}, default=0.9,
+                            tokens={CHAMPION_ID: 20_000}, default_tokens=5_000)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"), pipeline)
+    state = start(ctx, env)
+
+    assert state.champion_id != CHAMPION_ID
+    record = [r for r in log_of(env) if r.outcome == OUTCOME_PROMOTED][0]
+    assert record.metrics_delta["output_tokens"] < 0
+
+
+def test_repeated_gate_after_resume_does_not_duplicate_records(tmp_path):
+    """Стадия Gate может повториться при resume — журнал не должен раздваиваться."""
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="champion"), FakePipeline())
+    state = start(ctx, env)
+
+    gen = state.generations[0]
+    evolve._gate(ctx, state, gen)
+    assert len(log_of(env)) == 2
+
+
+def challenger(candidate_id, win_rate, tokens, runs=2):
+    return evolve.CandidateRecord(
+        candidate_id=candidate_id, candidate_dir="/нет", win_rate=win_rate,
+        metrics=RunMetrics(runs=runs, output_tokens=tokens))
+
+
+def test_more_wins_beat_a_cheaper_rival():
+    """Цена — тай-брейк, а не главный критерий: качество решает первым."""
+    cheap = challenger("дешёвый", win_rate=0.6, tokens=1_000)
+    strong = challenger("сильный", win_rate=1.0, tokens=50_000)
+    assert evolve._better_challenger(cheap, strong) is strong
+    assert evolve._better_challenger(strong, cheap) is strong
+
+
+def test_loser_is_told_why_it_lost():
+    strong = challenger("сильный", win_rate=1.0, tokens=50_000)
+    weak = challenger("слабый", win_rate=0.6, tokens=1_000)
+    assert "попарок" in evolve._why_lost(strong, weak)
+    assert "дешевле" in evolve._why_lost(
+        strong, challenger("дорогой", win_rate=1.0, tokens=90_000))
+
+
+def test_delta_without_metrics_is_empty():
+    """Кандидат без единого успешного прогона не даёт дельт, а не нулевые."""
+    assert evolve_memory.metrics_delta(None, RunMetrics()) == {}
+    assert evolve_memory.metrics_delta(RunMetrics(), None) == {}

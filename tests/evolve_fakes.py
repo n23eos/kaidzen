@@ -13,8 +13,8 @@ from kaidzen.evolve import EvolveContext
 from kaidzen.roles.meta.diagnostician import Diagnosis
 from kaidzen.roles.meta.meta_judge import Comparison
 from kaidzen.roles.meta.mutator import MutationProposal
-from kaidzen.state import (Assumption, ChangelogEntry, Fact, RunState, Version,
-                           save_state)
+from kaidzen.state import (ApiUsage, Assumption, ChangelogEntry, Fact, RunState,
+                           Version, save_state)
 from tests.test_candidate import make_candidate
 
 DOMAIN = "business"
@@ -86,10 +86,14 @@ class FakePipeline:
     """
 
     def __init__(self, *, closed=None, holdout_closed=None, default=0.5,
-                 fails=(), interrupt_after=None):
+                 tokens=None, default_tokens=0, fails=(), interrupt_after=None):
         self.closed = dict(closed or {})
         self.holdout_closed = dict(holdout_closed or {})
         self.default = default
+        # расход выходных токенов на прогон: по нему Gate решает тай-брейк и
+        # ловит кандидата, купившего улучшение непропорциональной ценой
+        self.tokens = dict(tokens or {})
+        self.default_tokens = default_tokens
         self.fails = set(fails)
         self.interrupt_after = interrupt_after
         self.calls: list[tuple[str, str]] = []
@@ -102,8 +106,10 @@ class FakePipeline:
         # имя потомка несёт метку прогона, поэтому сравниваем по префиксу
         if any(candidate.candidate_id.startswith(f) for f in self.fails):
             raise RuntimeError("бэкенд лёг")
+        found = self._lookup(self.tokens, candidate.candidate_id)
         state = make_run_state(candidate.candidate_id, run_dir.name,
-                               self._rate(candidate.candidate_id, idea))
+                               self._rate(candidate.candidate_id, idea),
+                               self.default_tokens if found is None else found)
         save_state(state, run_dir)
         return state
 
@@ -124,7 +130,8 @@ class FakePipeline:
         return self.default if found is None else found
 
 
-def make_run_state(candidate_id: str, run_id: str, closed_rate: float) -> RunState:
+def make_run_state(candidate_id: str, run_id: str, closed_rate: float,
+                   output_tokens: int = 0) -> RunState:
     """Состояние прогона с заданной долей закрытых критичных допущений."""
     closed = round(closed_rate * HIGH_ASSUMPTIONS)
     assumptions = [
@@ -139,7 +146,8 @@ def make_run_state(candidate_id: str, run_id: str, closed_rate: float) -> RunSta
     return RunState(run_id=run_id, candidate_id=candidate_id,
                     config={"loop": {"max_iterations": 4}},
                     original_idea="сырая идея", assumptions=assumptions,
-                    versions=[version], iteration=2, stop_reason="plateau")
+                    versions=[version], iteration=2, stop_reason="plateau",
+                    api_usage=ApiUsage(output_tokens=output_tokens))
 
 
 def make_env(tmp_path: Path):
