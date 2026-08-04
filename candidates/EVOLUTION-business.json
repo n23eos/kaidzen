@@ -1,0 +1,151 @@
+[
+  {
+    "evolve_id": "2026-08-03-045447-business",
+    "generation": 1,
+    "candidate_id": "gen001-a",
+    "parent_id": "gen000-business",
+    "hypothesis": "researcher: добавлен жёсткий порог вердикта (≥2 прямых факта → partial запрещён, обязателен confirmed/refuted; отдельное правило для допущений вида «существует X» — сравнивать найденные числа самому) и обязательные строки `НЕ ХВАТИЛО:` / `ЗАКРЫЛО БЫ:` в notes при partial, без которых вердикт считается браком — по гипотезе «запретить вердикт «частично» без обязательного поля «чего именно не хватило + какой конкретный запрос/источник это закрыл бы»; при наличии ≥2 фактов, прямо относящихся к формулировке допущения, требовать выбора confirmed/refuted», отвечающей на partial_rate 0.4 при assumptio",
+    "roles_touched": [
+      "researcher"
+    ],
+    "outcome": "rejected",
+    "gate_reason": "проиграл попарки: 0% < 55%",
+    "win_rate": 0.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": 0.1667,
+      "partial_rate": -0.2889,
+      "high_closed": 1.0,
+      "output_tokens": -17065.0
+    },
+    "comparable_ideas": 1
+  },
+  {
+    "evolve_id": "2026-08-03-045447-business",
+    "generation": 1,
+    "candidate_id": "gen001-b",
+    "parent_id": "gen000-business",
+    "hypothesis": "analyzer: переписан порядок работы на три прохода с фильтром «проверяемо публичными источниками» и жёстким лимитом реестра 5–6 high/medium, остальное уходит в отдельный список полевых тестов мимо researcher — по гипотезе «ограничить выдачу 5–6 допущениями критичности high/medium и требовать для каждого признак „проверяемо публичными источниками“, остальное выносить в отдельный список полевых тестов, минуя researcher» (high_total 6 из 10, 24 web_searches, hit_iteration_limit true, low-допущение A9 съело 3 факта и 3 поиска и закрылось partial).\nrefiner: вместо ужесточения формулировок изменён са",
+    "roles_touched": [
+      "analyzer",
+      "refiner"
+    ],
+    "outcome": "rejected",
+    "gate_reason": "продвинут ошибочно и откачен: доля выросла за счёт ужатого реестра, а не за счёт закрытых вопросов (Gate тогда этого не ловил)",
+    "win_rate": 1.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": 0.3333,
+      "partial_rate": -0.4,
+      "high_closed": 0.0,
+      "output_tokens": -47086.0
+    },
+    "comparable_ideas": 1
+  },
+  {
+    "evolve_id": "2026-08-03-140831-business",
+    "generation": 1,
+    "candidate_id": "gen001-a",
+    "parent_id": "gen000-business",
+    "hypothesis": "researcher: запретить вердикт «partial» без явного поля «чего не хватило» (какой сегмент/регион/период данных отсутствует) и добавить правило «если найденный факт прямо противоречит формулировке допущения — это refuted, а не partial; несовпадение по силе формулировки не повод хеджировать». Обоснование: partial_rate 0.2485 при assumptions_closed_rate 0.75; кейсы отчёт 2 A10 и отчёт 3 A9 (6 фактов, вывод-опровержение, статус partial) закрылись бы вердиктом.; analyzer: ограничить вывод 6–8 допущениями и требовать поле «проверяемо веб-поиском: да/нет»; допущения, проверяемые только пилотом (внутре",
+    "roles_touched": [],
+    "outcome": "discarded",
+    "gate_reason": "кандидат gen001-a уже существует",
+    "win_rate": null,
+    "metrics_delta": {},
+    "comparable_ideas": 0
+  },
+  {
+    "evolve_id": "2026-08-03-140831-business",
+    "generation": 1,
+    "candidate_id": "gen001-b",
+    "parent_id": "gen000-business",
+    "hypothesis": "researcher: запретить вердикт «partial» без явного поля «чего не хватило» (какой сегмент/регион/период данных отсутствует) и добавить правило «если найденный факт прямо противоречит формулировке допущения — это refuted, а не partial; несовпадение по силе формулировки не повод хеджировать». Обоснование: partial_rate 0.2485 при assumptions_closed_rate 0.75; кейсы отчёт 2 A10 и отчёт 3 A9 (6 фактов, вывод-опровержение, статус partial) закрылись бы вердиктом.; analyzer: ограничить вывод 6–8 допущениями и требовать поле «проверяемо веб-поиском: да/нет»; допущения, проверяемые только пилотом (внутре",
+    "roles_touched": [],
+    "outcome": "discarded",
+    "gate_reason": "кандидат gen001-b уже существует",
+    "win_rate": null,
+    "metrics_delta": {},
+    "comparable_ideas": 0
+  },
+  {
+    "evolve_id": "2026-08-03-145054-business",
+    "generation": 1,
+    "candidate_id": "gen001-a-145054",
+    "parent_id": "gen000-business",
+    "hypothesis": "analyzer: добавлена обязательная классификация каждого допущения меткой [web]/[field], правило разграничения (опубликованный ответ vs ответ, появляющийся только после действия), запрет отдавать [field] в поиск и требование дублировать [field] в неизвестные с минимальным дешёвым тестом; отдельно предписано разбивать вопрос про канал на публикуемую часть (стоимость лида в сегменте) и полевую (окупаемость своего оффера) — по гипотезе «добавить в промпт обязательную классификацию каждого допущения по способу проверки и запретить передавать researcher допущения второго типа, отправляя их сразу в ne",
+    "roles_touched": [
+      "analyzer"
+    ],
+    "outcome": "rejected",
+    "gate_reason": "проиграл попарки: 0% < 55%",
+    "win_rate": 0.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": -0.0223,
+      "partial_rate": 0.169,
+      "high_closed": 11.0,
+      "output_tokens": 4044.0
+    },
+    "comparable_ideas": 1
+  },
+  {
+    "evolve_id": "2026-08-03-145054-business",
+    "generation": 1,
+    "candidate_id": "gen001-b-145054",
+    "parent_id": "gen000-business",
+    "hypothesis": "analyzer: добавлен обязательный второй проход — маршрутизация каждого допущения по метке [web]/[field]/[known], запрет отдавать [field] в веб-поиск, требование расщеплять полевой вопрос на веб-проверяемый прокси + полевую часть с дешёвым тестом, лимит 5 high-[web] и сортировка по критичности — по гипотезе «добавить в промпт обязательную классификацию каждого допущения по способу проверки и запретить передавать researcher допущения второго типа, отправляя их сразу в next steps» (данные: assumptions_closed_rate=0.774, A3 untestable, A5 про CAC/канал дал partial в обоих прогонах, 47 поисков на 7 ",
+    "roles_touched": [
+      "analyzer",
+      "judge"
+    ],
+    "outcome": "rejected",
+    "gate_reason": "проиграл попарки: 0% < 55%",
+    "win_rate": 0.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": -0.128,
+      "partial_rate": 0.1827,
+      "high_closed": 12.0,
+      "output_tokens": 12399.0
+    },
+    "comparable_ideas": 1
+  },
+  {
+    "evolve_id": "2026-08-03-165138-business",
+    "generation": 1,
+    "candidate_id": "gen001-a-165138",
+    "parent_id": "gen000-business",
+    "hypothesis": "researcher: добавлено обязательное поле missing_evidence при вердиктах partial/untestable плюс «правило двух чисел» (≥2 фактов с числами ⇒ обязателен confirmed/refuted), запрет размытых формулировок недостающего доказательства — по гипотезе «запретить вердикт partial без обязательного поля missing_evidence и правила: если найдено ≥2 фактов с числами по допущению — обязан выбрать confirmed или refuted; целевая метрика partial_rate 0.303 → ≤0.15, assumptions_closed_rate 0.5 → ≥0.75».\nresearcher: введён блок «Порядок обхода — сначала пустые допущения» с жёстким приоритетом (high без фактов → medi",
+    "roles_touched": [
+      "researcher"
+    ],
+    "outcome": "promoted",
+    "gate_reason": "выиграл попарки (100%), метрики не просели",
+    "win_rate": 1.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": 0.5,
+      "partial_rate": -0.303,
+      "high_closed": 7.0,
+      "output_tokens": 13111.0
+    },
+    "comparable_ideas": 2
+  },
+  {
+    "evolve_id": "2026-08-03-165138-business",
+    "generation": 1,
+    "candidate_id": "gen001-b-165138",
+    "parent_id": "gen000-business",
+    "hypothesis": "analyzer: переписан порядок работы роли — два прохода (черновой список → сжатие), жёсткий потолок 7 допущений, обязательная склейка дублей, отсев непроверяемого поиском в unknowns, ранжирование по критичности через порядок id, требование формулировать допущение как готовое поисковое задание с величиной/сегментом/географией — по гипотезе «analyzer: ограничить набор до 6–7 допущений на идею с явным ранжированием по критичности вместо 11–12, чтобы поисковый бюджет researcher закрывал каждое».\nanalyzer: убран уровень criticality=low из реестра (детали исполнения отсеиваются на шаге сжатия) — по то",
+    "roles_touched": [
+      "analyzer",
+      "refiner"
+    ],
+    "outcome": "rejected",
+    "gate_reason": "проиграл попарки: 0% < 55%",
+    "win_rate": 0.0,
+    "metrics_delta": {
+      "assumptions_closed_rate": 0.3,
+      "partial_rate": -0.053,
+      "high_closed": 1.0,
+      "output_tokens": -9886.0
+    },
+    "comparable_ideas": 2
+  }
+]
