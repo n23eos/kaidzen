@@ -70,13 +70,21 @@ def _prompts_block(candidate: Candidate) -> str:
 
 
 def run_mutator(backend, meta: MetaConfig, candidate: Candidate, *,
-                diagnosis: Diagnosis, attempt: int) -> MutationProposal:
-    """attempt задаёт угол атаки, поэтому челленджеры поколения различаются."""
+                diagnosis: Diagnosis, attempt: int,
+                do_not_break: str = "") -> MutationProposal:
+    """attempt задаёт угол атаки, поэтому челленджеры поколения различаются.
+
+    `do_not_break` — уже принятые находки из журнала эволюции. Мутатор видит
+    только промпты родителя и не знает, какие их места оплачены прошлыми
+    поколениями; без этого списка он переписывает удачную правку поверх и
+    откатывает систему к тому, что уже проиграло сравнение.
+    """
     weaknesses = "\n".join(f"- {w}" for w in diagnosis.weaknesses)
     hypotheses = "\n".join(f"- {h}" for h in diagnosis.hypotheses)
     angle = ATTEMPT_ANGLES[attempt % len(ATTEMPT_ANGLES)]
+    accepted = f"{do_not_break}\n\n" if do_not_break else ""
     user = (f"Слабые места родителя:\n{weaknesses}\n\n"
-            f"Гипотезы улучшения:\n{hypotheses}\n\n"
+            f"Гипотезы улучшения:\n{hypotheses}\n\n{accepted}"
             f"Правимая часть конфига родителя:\n\n{_editable_config(candidate)}\n\n"
             f"Промпты родителя:\n\n{_prompts_block(candidate)}\n\n"
             f"Это попытка №{attempt + 1}. {angle}\n\n"

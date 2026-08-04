@@ -14,8 +14,11 @@ from tests.conftest import FakeLLM
 
 META = MetaConfig()
 
-# слова, любое из которых в вызове судьи означает утечку контекста сравнения
-LEAK_WORDS = ("gen00", "челленджер", "чемпион", "диагноз", "мутац", "rationale")
+# слова, любое из которых в вызове судьи означает утечку контекста сравнения;
+# журнал эволюции добавлен сюда же: история правок сделала бы судью пристрастным
+# ровно тем способом, от которого его ограждали
+LEAK_WORDS = ("gen00", "челленджер", "чемпион", "диагноз", "мутац", "rationale",
+              "журнал", "поколени", "гипотез", "не ломать", "promoted")
 
 
 def _diagnosis():
@@ -168,3 +171,50 @@ def test_meta_backend_is_built_from_the_config():
     from kaidzen.roles.meta import build_meta_backend
 
     assert isinstance(build_meta_backend(MetaConfig()), ClaudeAgentBackend)
+
+
+# --- память эволюции --------------------------------------------------------
+
+def test_diagnostician_gets_the_evolution_digest(candidate):
+    """Диагност обязан видеть, что уже пробовали до него."""
+    llm = FakeLLM([_diagnosis()])
+    run_diagnostician(llm, META, metrics=RunMetrics(), reports=["о"],
+                      memory="## Журнал эволюции\n- ужать реестр — ОТКЛОНЕНО")
+    user = llm.calls[0]["user"]
+    assert "ужать реестр" in user and "ОТКЛОНЕНО" in user
+
+
+def test_diagnostician_without_memory_says_nothing_about_the_log(candidate):
+    """Первый прогон домена: пустой раздел журнала только сбивал бы с толку."""
+    llm = FakeLLM([_diagnosis()])
+    run_diagnostician(llm, META, metrics=RunMetrics(), reports=["о"])
+    assert "Журнал эволюции" not in llm.calls[0]["user"]
+
+
+def test_diagnostician_prompt_forbids_repeating_rejected_hypotheses():
+    system = load_meta_prompt("diagnostician")
+    assert "rejected" in system
+    assert "чем на этот раз" in system
+
+
+def test_mutator_gets_the_do_not_break_list(candidate):
+    llm = FakeLLM([MutationProposal(rationale="r")])
+    run_mutator(llm, META, candidate, diagnosis=_diagnosis(), attempt=0,
+                do_not_break="## Уже принятые находки — не ломать\n- правило двух чисел")
+    assert "правило двух чисел" in llm.calls[0]["user"]
+
+
+def test_mutator_without_accepted_findings_gets_no_empty_section(candidate):
+    llm = FakeLLM([MutationProposal(rationale="r")])
+    run_mutator(llm, META, candidate, diagnosis=_diagnosis(), attempt=0)
+    assert "не ломать" not in llm.calls[0]["user"]
+
+
+def test_mutator_prompt_warns_that_overwriting_findings_is_a_regression():
+    assert "регресс" in load_meta_prompt("mutator")
+
+
+def test_meta_judge_signature_has_no_room_for_memory():
+    """Журнал не должен доехать до судьи даже случайным именованным аргументом."""
+    params = list(inspect.signature(run_meta_judge).parameters)
+    assert "memory" not in params and "do_not_break" not in params
