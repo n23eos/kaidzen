@@ -405,3 +405,28 @@ def test_compare_warns_when_comparison_set_is_too_thin(tmp_path):
     ctx = make_ctx(env, FakeMeta(), pipeline, on_event=events.append)
     run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
     assert evolve.MIN_COMPARABLE_IDEAS >= 2
+
+
+def test_eval_run_writes_a_readable_report(tmp_path):
+    """Рядом с состоянием должен лежать читаемый отчёт.
+
+    Без него результат поколения приходится доставать из state.json руками —
+    а собрать отчёт можно бесплатно, модель для этого не нужна.
+    """
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(), FakePipeline())
+    run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    reports = list((env.evolve_dir / "runs").rglob("report.md"))
+    states = list((env.evolve_dir / "runs").rglob("state.json"))
+    assert reports, "ни одного отчёта не собрано"
+    assert len(reports) == len(states), "отчёт есть не у каждого прогона"
+    text = reports[0].read_text(encoding="utf-8")
+    assert "## Допущения" in text and "## Next steps" in text
+
+
+def test_failed_eval_run_does_not_break_on_missing_report(tmp_path):
+    """Упавший прогон отчёта не оставляет — и это не должно ронять поколение."""
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(), FakePipeline(fails={"gen001-a"}))
+    state = run_evolve(ctx, champion_dir=env.champion_dir, max_generations=1)
+    assert state.generations[-1].challengers

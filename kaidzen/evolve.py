@@ -71,6 +71,8 @@ MIN_COMPARABLE_IDEAS = 2
 STATE_FILE = "state.json"
 SUMMARY_FILE = "summary.md"
 RUNS_DIR = "runs"
+REPORT_FILE = "report.md"
+EVAL_SUMMARY_NOTE = ("_Прогон мета-лупа: executive summary не генерировался, чтобы не тратить\nвызов модели на каждый eval._")
 # Мягкая остановка — отдельный файл, а не поле в state.json: evolve-stop пишется
 # ЧУЖИМ процессом, пока оркестратор работает, и его правку state.json первое же
 # сохранение молча затрёт. Файл переживает любые сохранения.
@@ -624,7 +626,20 @@ def _one_eval(ctx: EvolveContext, record: CandidateRecord,
                              run_dir=run_dir)
     except Exception as e:
         return base.model_copy(update={"ok": False, "error": str(e)})
+    _write_eval_report(state, run_dir)
     return base.model_copy(update={"metrics": run_metrics(state)})
+
+
+def _write_eval_report(state: RunState, run_dir: Path) -> None:
+    """Читаемый отчёт рядом с состоянием.
+
+    Сборка отчёта не требует модели, поэтому делать её здесь ничего не стоит,
+    а без неё результат поколения приходится выковыривать из state.json руками.
+    Executive summary не генерируем: это единственная часть, требующая вызова
+    модели, и ради неё гонять её на каждый eval-прогон не стоит.
+    """
+    report = build_report(state, summary_text=EVAL_SUMMARY_NOTE)
+    (run_dir / REPORT_FILE).write_text(report, encoding="utf-8")
 
 
 def _eval_candidate(candidate_dir: Path) -> Candidate:
