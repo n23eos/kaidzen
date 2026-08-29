@@ -1,33 +1,33 @@
 # Kaidzen
 
-Шлифовка сырой идеи фактами из веб-поиска — и эволюция самих инструкций, по которым идёт шлифовка.
+Polishes a raw idea with facts from web search — and evolves the very instructions that drive the polishing.
 
-Два уровня:
+Two levels:
 
-- **Уровень 1** берёт идею в 1–3 абзаца и гоняет её циклом Analyzer → Researcher → Refiner → Judge. На выходе — отшлифованная идея, таблица допущений с вердиктами и ссылками на источники, оценки по рубрике и список того, что проверяется только экспериментом.
-- **Уровень 2** эволюционирует инструкции Уровня 1: диагностирует слабости, порождает мутации, прогоняет их на бенчмарке идей, сравнивает результаты вслепую и продвигает победителя только при непроседании объективных метрик.
+- **Level 1** takes an idea of 1–3 paragraphs and runs it through an Analyzer → Researcher → Refiner → Judge loop. The output is a polished idea, an assumption table with verdicts and source links, rubric scores, and a list of things that can only be validated by experiment.
+- **Level 2** evolves the instructions of Level 1: it diagnoses weaknesses, generates mutations, runs them on a benchmark of ideas, compares results blindly, and promotes the winner only if objective metrics don't regress.
 
-Работает **на подписке Claude, без API-ключа**. Ключи OpenAI, DeepSeek и Anthropic подключаются опционально, на каждую роль отдельно.
+Runs **on a Claude subscription, no API key required**. OpenAI, DeepSeek, and Anthropic keys can be plugged in optionally, per role.
 
 ---
 
-## Быстрый старт
+## Quick start
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
-Ключи не нужны: бэкенд по умолчанию — `subscription`, он поднимает установленный `claude` CLI и работает от подписки.
+No keys needed: the default backend is `subscription` — it drives the installed `claude` CLI and runs off your subscription.
 
-Отшлифовать идею:
+Polish an idea:
 
 ```bash
-python -m kaidzen run моя-идея.md --domain business
+python -m kaidzen run my-idea.md --domain business
 ```
 
-Прогон идёт несколько минут, прогресс печатается по ходу. Результат — `runs/<дата>-<идея>/report.md`.
+A run takes several minutes; progress is printed as it goes. The result is `runs/<date>-<idea>/report.md`.
 
-Прерванный прогон продолжается с места остановки, отчёт пересобирается без обращения к модели:
+An interrupted run resumes from where it stopped, and the report can be rebuilt without calling the model:
 
 ```bash
 python -m kaidzen resume runs/<id>/
@@ -36,62 +36,62 @@ python -m kaidzen report runs/<id>/
 
 ---
 
-## Как устроен Уровень 1
+## How Level 1 works
 
-| Роль | Что делает |
+| Role | What it does |
 |---|---|
-| **Analyzer** | Раскладывает идею на проблему, аудиторию, механику и **реестр допущений** — всё, что идея принимает на веру. Каждому допущению даёт критичность. |
-| **Researcher** | Берёт самые рискованные непроверенные допущения и проверяет их веб-поиском. Возвращает факты со ссылками и вердикт: подтверждено, опровергнуто, частично, непроверяемо поиском. |
-| **Refiner** | Переписывает идею по находкам и по критике судьи. Каждая правка обязана ссылаться на закрытое допущение или пункт критики. |
-| **Judge** | Оценивает новую версию по рубрике из пяти осей, сравнивает с предыдущей, пишет критику для следующей итерации. |
+| **Analyzer** | Breaks the idea down into problem, audience, mechanics, and an **assumption registry** — everything the idea takes on faith. Assigns a criticality to each assumption. |
+| **Researcher** | Takes the riskiest unverified assumptions and checks them via web search. Returns facts with links and a verdict: confirmed, refuted, partial, or unverifiable by search. |
+| **Refiner** | Rewrites the idea based on the findings and the judge's critique. Every edit must reference a closed assumption or a critique item. |
+| **Judge** | Scores the new version against a five-axis rubric, compares it to the previous one, and writes critique for the next iteration. |
 
-Цикл останавливается, когда прирост оценки вышел на плато, исчерпан лимит итераций или закрыты все критичные допущения.
+The loop stops when the score gain plateaus, the iteration limit is exhausted, or all critical assumptions are closed.
 
-### Что защищает от «полировки в вакууме»
+### What guards against "polishing in a vacuum"
 
-Главная опасность такой системы — текст становится красивее, а идея не лучше. Защиты встроены на трёх уровнях и проверены живыми прогонами:
+The main danger of a system like this: the text gets prettier while the idea doesn't get better. Guards are built in at three levels and verified by live runs:
 
-- Refiner не может внести правку без ссылки на факт или критику — оркестратор отклоняет такой ответ и переспрашивает.
-- Judge не видит список изменений Refiner'а: он оценивает результат, а не рассказ о работе.
-- Вызов с поиском, не сделавший ни одного запроса, не засчитывается. Иначе модель охотно выдаёт правдоподобный, но выдуманный URL — это наблюдалось.
+- The Refiner can't make an edit without referencing a fact or a critique item — the orchestrator rejects such a response and asks again.
+- The Judge doesn't see the Refiner's changelog: it scores the result, not the story about the work.
+- A search-enabled call that made zero queries doesn't count. Otherwise the model happily produces a plausible but fabricated URL — this was observed in practice.
 
 ---
 
-## Как устроен Уровень 2
+## How Level 2 works
 
 ```bash
 python -m kaidzen evolve --domain business --generations 3
-python -m kaidzen checkpoint evolve/<id>/            # прочитать сводку
-python -m kaidzen checkpoint evolve/<id>/ --approve  # или --reject
-python -m kaidzen evolve-stop evolve/<id>/           # мягкая остановка
+python -m kaidzen checkpoint evolve/<id>/            # read the summary
+python -m kaidzen checkpoint evolve/<id>/ --approve  # or --reject
+python -m kaidzen evolve-stop evolve/<id>/           # graceful stop
 python -m kaidzen evolve-resume evolve/<id>/
 ```
 
-Одно поколение: диагноз слабостей чемпиона → две мутации → прогон каждой на train-идеях → слепое попарное сравнение отчётов → Gate → возможная смена чемпиона.
+One generation: diagnose the champion's weaknesses → two mutations → run each on the train ideas → blind pairwise comparison of reports → Gate → possible champion change.
 
-`evolve` никогда не запускается сам: ни демона, ни расписания. Мягкая остановка дозавершает текущее поколение, чтобы не выбрасывать уже отработанные прогоны.
+`evolve` never starts on its own: no daemon, no schedule. A graceful stop finishes the current generation so already-completed runs aren't thrown away.
 
-### Три защиты от Гудхарта
+### Three defenses against Goodhart
 
-Система оптимизирует метрики, а метрики можно накрутить. Каждая защита появилась не из теории, а после того, как эволюция реально попыталась смухлевать:
+The system optimizes metrics, and metrics can be gamed. Each defense came not from theory but from the evolution actually trying to cheat:
 
-1. **Объективные метрики считаются кодом, не моделью.** Доля закрытых допущений, доля хеджирующих вердиктов, обоснованность правок, расход токенов. Красивый отчёт при упавших числах промоцию не получит.
-2. **Абсолютные числа рядом с долями.** Первая же эволюция подняла долю закрытых допущений до 100%, просто выбросив часть вопросов из реестра — числитель тот же, знаменатель меньше. Теперь ужатие реестра больше чем на 20% требует роста закрытых **в штуках**.
-3. **Слепое сравнение и holdout.** Судья видит только два обезличенных отчёта и сравнивает каждую пару дважды с перестановкой мест — расхождение считается ничьёй. Часть идей не участвует в эволюции и проверяется на чекпоинтах: лучше на обучающих, но не на отложенных — значит подгонка.
+1. **Objective metrics are computed by code, not by a model.** Share of closed assumptions, share of hedging verdicts, edit groundedness, token spend. A pretty report with worse numbers doesn't get promoted.
+2. **Absolute counts next to ratios.** The very first evolution pushed the closed-assumption ratio to 100% by simply dropping questions from the registry — same numerator, smaller denominator. Now shrinking the registry by more than 20% requires the number of closed assumptions to grow **in absolute terms**.
+3. **Blind comparison and holdout.** The judge sees only two anonymized reports and compares each pair twice with positions swapped — a disagreement counts as a tie. Some ideas don't participate in evolution and are checked at checkpoints: better on training ideas but not on held-out ones means overfitting.
 
-Мета-уровень **не эволюционирует сам**: промпты диагноста, мутатора и судьи правятся руками. Если система начнёт улучшать собственного судью, линейка поедет вместе с измеряемым — подробности в `docs/specs/2026-08-03-evolution-memory.md` §5.
+The meta level **does not evolve itself**: the diagnostician, mutator, and judge prompts are edited by hand. If the system started improving its own judge, the ruler would drift along with what it measures — details in `docs/specs/2026-08-03-evolution-memory.md` §5.
 
-### Память между прогонами
+### Memory between runs
 
-`candidates/EVOLUTION-<домен>.json` — журнал всех попыток мутаций с исходами. Диагност видит, что уже пробовали и что было отклонено; мутатор получает список принятых находок с пометкой «не ломать». Без журнала каждый прогон начинал с нуля и повторял чужие ошибки.
+`candidates/EVOLUTION-<domain>.json` is a log of all mutation attempts with their outcomes. The diagnostician sees what has already been tried and what was rejected; the mutator gets the list of accepted findings marked "do not break". Without the log, every run started from scratch and repeated past mistakes.
 
 ---
 
-## Кандидаты, бэкенды, модели
+## Candidates, backends, models
 
-**Кандидат** — сменный набор инструкций: `config.yaml` плюс промпты пяти ролей. Домены `generic`, `business`, `games` — это просто разные кандидаты. Текущий чемпион домена записан в `candidates/CHAMPION-<домен>`.
+A **candidate** is a swappable instruction set: `config.yaml` plus prompts for the five roles. The domains `generic`, `business`, and `games` are just different candidates. The current champion of a domain is recorded in `candidates/CHAMPION-<domain>`.
 
-Модель и транспорт задаются **на каждую роль отдельно**:
+Model and transport are configured **per role**:
 
 ```yaml
 backends:
@@ -102,31 +102,37 @@ roles:
   judge:      { backend: subscription, model: claude-opus-5 }
 ```
 
-Веб-поиск умеют `subscription` и `anthropic`. У `deepseek` и `openai` его нет, поэтому конфиг **не даст** поставить туда Researcher — без поиска он не сможет закрывать допущения фактами. Остальные роли туда ставить можно.
+Web search is supported by `subscription` and `anthropic`. `deepseek` and `openai` don't have it, so the config **won't let** you assign the Researcher to them — without search it can't close assumptions with facts. Any other role can go there.
 
-Ключи берутся из переменных окружения или из `.env` (см. `.env.example`). В конфиге хранится только имя переменной, никогда само значение.
+Keys are read from environment variables or from `.env` (see `.env.example`). The config stores only the variable name, never the value itself.
 
 ---
 
-## Структура
+## Layout
 
 ```
-kaidzen/            код: роли, оркестраторы, бэкенды, метрики, Gate
-candidates/         кандидаты (инструкции) + указатели чемпионов + журнал эволюции
-benchmark/          идеи для эволюции: <домен>/ideas/*.md
-runs/               прогоны Уровня 1        (в .gitignore)
-evolve/             прогоны Уровня 2        (в .gitignore)
-docs/specs/         ТЗ
-docs/superpowers/   планы реализации
-scripts/            разовые служебные скрипты
-tests/              501 тест
+kaidzen/            code: roles, orchestrators, backends, metrics, Gate
+candidates/         candidates (instruction sets) + champion pointers + evolution log
+benchmark/          ideas for evolution: <domain>/ideas/*.md
+runs/               Level 1 runs        (gitignored)
+evolve/             Level 2 runs        (gitignored)
+docs/specs/         specs
+docs/superpowers/   implementation plans
+scripts/            one-off utility scripts
+tests/              501 tests
 ```
 
-## Разработка
+Note: the role prompts, specs, and benchmark ideas are written in Russian — that's the language the system has been developed and evaluated in.
+
+## Development
 
 ```bash
 .venv/bin/pytest -q
 .venv/bin/pytest --cov=kaidzen -q
 ```
 
-Тесты не ходят в сеть. Живые прогоны, однако, находили то, чего тесты не видели — сломанный протокол повторов, неверную форму запроса к модели, коллизию имён между прогонами, схлопывание выборки сравнения. Перед тем как доверять изменению в оркестраторе или бэкенде, стоит прогнать одно живое поколение.
+Tests don't touch the network. Live runs, however, kept finding what tests couldn't see — a broken retry protocol, a malformed model request, name collisions between runs, a collapsed comparison sample. Before trusting a change to the orchestrator or a backend, run one live generation.
+
+## License
+
+[MIT](LICENSE)

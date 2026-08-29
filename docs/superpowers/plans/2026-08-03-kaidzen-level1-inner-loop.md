@@ -57,7 +57,7 @@ kaidzen/
 - [ ] **Step 1: git init + скелет**
 
 ```bash
-cd /Users/nickeo23/code_projects/Kaidzen
+cd kaidzen
 git init
 mkdir -p kaidzen/roles tests candidates runs
 touch kaidzen/__init__.py kaidzen/roles/__init__.py

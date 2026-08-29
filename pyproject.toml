@@ -1,6 +1,8 @@
 [project]
 name = "kaidzen"
 version = "0.1.0"
+description = "Polish a raw idea with facts from web search — and evolve the instructions that drive the polishing"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = ["anthropic>=0.40", "claude-agent-sdk>=0.2.128", "openai>=1.40",
                 "pydantic>=2.7", "pyyaml>=6.0"]

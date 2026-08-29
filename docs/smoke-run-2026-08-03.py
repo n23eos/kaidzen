@@ -10,7 +10,7 @@ from kaidzen.candidate import load_candidate
 from kaidzen.state import (Analysis, Assumption, ChangelogEntry, Fact,
                            JudgeResult, RunState, Version, save_state)
 
-ROOT = Path("/Users/nickeo23/code_projects/Kaidzen")
+ROOT = Path(__file__).resolve().parents[1]
 RUN_DIR = ROOT / "runs" / "2026-08-03-smoke-voice-tasks"
 
 candidate = load_candidate(ROOT / "candidates" / "gen000-business")
