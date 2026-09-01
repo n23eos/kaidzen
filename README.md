@@ -1,6 +1,12 @@
 # Kaidzen
 
-Polishes a raw idea with facts from web search — and evolves the very instructions that drive the polishing.
+**Kaidzen is a Python CLI that polishes a raw idea against facts from web search and then evolves the instructions doing the polishing.** Level 1 runs an idea of one to three paragraphs through an Analyzer, Researcher, Refiner and Judge loop, and writes a report with an assumption table, verdicts, source links and rubric scores. Level 2 mutates the Level 1 prompts, benchmarks the mutations on a set of ideas, compares them blind, and promotes a winner only when objective metrics do not regress. It runs on a Claude subscription by driving the local claude CLI, with OpenAI, DeepSeek and Anthropic keys optional per role. Interrupted runs resume, and reports rebuild without calling a model.
+
+<div align="center">
+
+[![Star on GitHub](https://img.shields.io/github/stars/n23eos/kaidzen?style=for-the-badge&logo=github&label=Star%20this%20repo&color=FFD700&labelColor=1a1a1a)](https://github.com/n23eos/kaidzen)
+
+</div>
 
 Two levels:
 
