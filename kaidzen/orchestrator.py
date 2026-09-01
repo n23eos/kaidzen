@@ -300,14 +300,17 @@ def _apply_findings(state: RunState, researcher_output) -> list[str]:
     остаются unverified, следующая итерация исследует их заново, и так до конца
     бюджета — прогон стоит денег и не проверяет ничего. Поэтому здесь ValueError:
     шаг уйдёт на повтор, и модель получит промпт заново.
+
+    Пустой список находок считается тем же случаем: реестр не сдвинулся, а
+    схеме такой ответ не противоречит, поэтому сам по себе он не отсеивается.
     """
     by_id = {a.id: a for a in state.assumptions}
     findings = researcher_output.findings
     unknown_ids = [f.assumption_id for f in findings if f.assumption_id not in by_id]
-    if findings and len(unknown_ids) == len(findings):
+    if len(unknown_ids) == len(findings):
         raise ValueError(
             "Researcher не вернул ни одной находки по существующим допущениям; "
-            f"неизвестные id: {', '.join(unknown_ids)}")
+            f"неизвестные id: {', '.join(unknown_ids) or 'находок нет вовсе'}")
 
     # реестр меняем только после проверки: неудачная попытка не должна
     # оставлять после себя половину применённых находок

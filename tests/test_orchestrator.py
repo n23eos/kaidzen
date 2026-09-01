@@ -553,6 +553,24 @@ def test_pipeline_retries_researcher_after_unknown_ids(candidate, tmp_path):
     assert state.stop_reason == "assumptions_exhausted"
 
 
+def test_pipeline_retries_researcher_after_empty_findings(candidate, tmp_path):
+    """Пустой список находок так же бесполезен, как выдуманные id.
+
+    Реестр не сдвинулся, значит следующая итерация исследовала бы ровно те же
+    допущения — и так до конца оплаченного бюджета. Шаг должен уйти на повтор.
+    """
+    llm = FakeLLM([analyzer_out(high("A1")),
+                   ResearcherOutput(findings=[]),         # находок нет вовсе
+                   research_out(("A1", "confirmed")),     # повтор удался
+                   refiner_out("версия 1", "A1"),
+                   make_judge(delta=2.0)])
+
+    state = run_pipeline(as_backends(llm), candidate, idea_text="идея",
+                         run_dir=tmp_path / "run-1", resume=False)
+
+    assert state.assumptions[0].status == "confirmed"
+
+
 def test_pipeline_applies_known_ids_and_reports_unknown_ones(candidate, tmp_path):
     llm = FakeLLM([analyzer_out(high("A1"), medium("A2")),
                    research_out(("A1", "confirmed"), ("A99", "confirmed")),
