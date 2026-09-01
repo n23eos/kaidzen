@@ -1,6 +1,4 @@
 """Тесты сборщика отчёта: build_report собирает markdown детерминированно из RunState."""
-import pytest
-
 from kaidzen.report import build_report
 from kaidzen.state import (ApiUsage, Assumption, ChangelogEntry, Fact,
                             JudgeResult, RunState, Version)
