@@ -146,5 +146,21 @@ def ancestry(candidate_dir: Path) -> list[str]:
         seen.add(resolved)
         chain.append(current.name)
         parent = _read_meta(current).get("parent")
-        current = current.parent / parent if parent else None
+        current = current.parent / parent if _is_folder_name(parent) else None
     return chain
+
+
+# имена, которые указывают не на кандидата, а на обход каталогов
+NOT_A_CANDIDATE = (".", "..")
+
+
+def _is_folder_name(parent: object) -> bool:
+    """В parent пишется имя папки (см. _apply_patch), а не путь.
+
+    Путь там означает порчу файла, и идти по нему нельзя: '..' указывает на
+    существующий каталог, проверкой на exists() не отсекается и попал бы в
+    линию предков кандидатом с именем '..'.
+    """
+    if not isinstance(parent, str) or not parent or parent in NOT_A_CANDIDATE:
+        return False
+    return parent == Path(parent).name

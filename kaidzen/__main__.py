@@ -75,6 +75,12 @@ def resolve_candidate_dir(*, candidates_root: Path, domain: str) -> Path:
     name = pointer.read_text(encoding="utf-8").strip()
     if not name:
         raise ValueError(f"файл-указатель пуст: {pointer}")
+    # указатель пишет write_champion_pointer, и там всегда имя папки; путь в
+    # нём означает правку руками или порчу файла, и уводит прогон за пределы
+    # каталога кандидатов
+    if name != Path(name).name:
+        raise ValueError(
+            f"в {pointer} должно быть имя каталога кандидата, а не путь: {name!r}")
     candidate_dir = candidates_root / name
     if not candidate_dir.is_dir():
         raise FileNotFoundError(

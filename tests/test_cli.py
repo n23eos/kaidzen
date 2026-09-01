@@ -1051,3 +1051,16 @@ def test_evolve_rejects_non_positive_limits(flag, value):
     так же молча подменялся единицей."""
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["evolve", flag, value])
+
+
+@pytest.mark.parametrize("name", ["../gen000-generic", "sub/gen000-generic",
+                                  "/etc"])
+def test_champion_pointer_must_name_a_folder_not_a_path(tmp_path, name):
+    """Указатель пишет write_champion_pointer, и там всегда имя папки.
+    Путь в нём — признак правки руками или порчи файла, и подставлять его
+    в candidates_root / name наугад не нужно."""
+    root = tmp_path / "candidates"
+    make_champion(root, "generic", name, create_dir=False)
+
+    with pytest.raises(ValueError, match="имя каталога"):
+        cli.resolve_candidate_dir(candidates_root=root, domain="generic")

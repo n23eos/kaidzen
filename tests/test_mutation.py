@@ -223,3 +223,17 @@ def test_broken_meta_json_names_the_file(tmp_path):
 
     with pytest.raises(ValueError, match="meta.json"):
         ancestry(candidate_dir)
+
+
+def test_ancestry_stops_on_parent_that_is_a_path(tmp_path):
+    """_apply_patch пишет в parent имя папки. Путь там — порча файла, и
+    обход по нему уходит за пределы каталога кандидатов: '..' указывает на
+    существующий каталог, поэтому проверкой на exists() он не отсекается и
+    попадает в линию предков как кандидат с именем '..'.
+    """
+    child = tmp_path / "gen001-a"
+    child.mkdir()
+    (child / "meta.json").write_text(
+        json.dumps({"parent": "..", "generation": 1}), encoding="utf-8")
+
+    assert ancestry(child) == ["gen001-a"]
