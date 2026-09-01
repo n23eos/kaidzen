@@ -1,4 +1,5 @@
 """Оркестратор поколений: промоция, слепота, остановки и возобновление."""
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -208,6 +209,53 @@ def test_failed_run_marks_idea_and_two_failures_reject_candidate(tmp_path):
     assert sum(1 for r in broken.runs if not r.ok) >= 2
     assert broken.win_rate is None          # до попарок дело не дошло
     assert state.champion_id.startswith("gen001-b")  # второй челленджер прошёл
+
+
+class _DoneFuture:
+    """Прогон, который успел завершиться до обрыва пула."""
+
+    def __init__(self, run):
+        self._run = run
+
+    def cancelled(self) -> bool:
+        return False
+
+    def result(self):
+        return self._run
+
+
+class _CancelledFuture:
+    """Прогон, который отменили до старта: результата у него нет."""
+
+    def cancelled(self) -> bool:
+        return True
+
+    def result(self):
+        raise AssertionError("результат отменённого прогона запрашивать нельзя")
+
+
+def test_drain_keeps_runs_that_were_already_started(tmp_path):
+    """Обрыв пула по FAILURE_LIMIT не должен выбрасывать оплаченную работу.
+
+    Отменить можно только не начавшийся прогон; начатый дойдёт до конца в любом
+    случае. Если его результат не записать, он пропадает и из record.runs, и из
+    кэша — а resume погонит ту же идею заново, потратив те же минуты.
+    """
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(), FakePipeline())
+    state = evolve.EvolveState(evolve_id="e1", domain=DOMAIN,
+                               champion_id=CHAMPION_ID,
+                               champion_dir=str(env.champion_dir))
+    record = evolve.CandidateRecord(candidate_id=CHAMPION_ID,
+                                    candidate_dir=str(env.champion_dir))
+    started = evolve.EvalRun(candidate_id=CHAMPION_ID, idea="b.md",
+                             run_dir=str(env.evolve_dir / "runs" / "b"))
+
+    evolve._drain(ctx, state, record,
+                  [_CancelledFuture(), _DoneFuture(started)])
+
+    assert [r.idea for r in record.runs] == ["b.md"]
+    assert evolve._cache_key(CHAMPION_ID, Path("b.md")) in state.cache
 
 
 def test_unstable_champion_stops_with_a_clear_error(tmp_path):

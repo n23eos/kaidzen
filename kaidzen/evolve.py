@@ -658,17 +658,41 @@ def _run_pool(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
     with ThreadPoolExecutor(max_workers=max(1, ctx.concurrency)) as pool:
         futures: list[Future] = [pool.submit(_one_eval, ctx, record, idea)
                                  for idea in ideas]
+        seen: set[Future] = set()
         for future in as_completed(futures):
-            run = future.result()
-            record.runs.append(run)
-            state.cache[_cache_key(record.candidate_id, Path(run.idea))] = run
-            _event(ctx, f"{record.candidate_id} / {Path(run.idea).name}: "
-                        f"{'готово' if run.ok else 'ошибка ' + run.error}")
-            _save(ctx, state)
+            seen.add(future)
+            _keep(ctx, state, record, future.result())
             if stop_on_failures and _failures(record) >= FAILURE_LIMIT:
                 for rest in futures:
                     rest.cancel()   # уже начатые дойдут сами, новые не стартуют
+                _drain(ctx, state, record,
+                       [f for f in futures if f not in seen])
                 break
+
+
+def _keep(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
+          run: EvalRun) -> None:
+    """Готовый прогон в запись кандидата, в кэш и в прогресс — одним местом."""
+    record.runs.append(run)
+    state.cache[_cache_key(record.candidate_id, Path(run.idea))] = run
+    _event(ctx, f"{record.candidate_id} / {Path(run.idea).name}: "
+                f"{'готово' if run.ok else 'ошибка ' + run.error}")
+    _save(ctx, state)
+
+
+def _drain(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
+           futures: list[Future]) -> None:
+    """Дособирает прогоны, которые отменить уже не вышло.
+
+    cancel() срабатывает только на не начавшийся прогон; начатый доходит до
+    конца в любом случае, и его результат оплачен теми же стенными часами, что
+    и остальные. Без этого он пропадал и из record.runs, и из кэша, а resume
+    гнал ту же идею заново — ровно та трата, ради экономии которой пул и рвётся.
+    """
+    for future in futures:
+        if future.cancelled():
+            continue
+        _keep(ctx, state, record, future.result())
 
 
 def _one_eval(ctx: EvolveContext, record: CandidateRecord,
