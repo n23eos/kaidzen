@@ -46,10 +46,19 @@ def _deep_merge(base: dict, patch: dict) -> dict:
 
 
 def _read_meta(candidate_dir: Path) -> dict:
+    """meta.json кандидата. Битый файл — ошибка с именем файла, а не трейсбек.
+
+    Начать с пустого словаря нельзя: тогда потомок молча стал бы корнем линии,
+    а set_status затёр бы остаток файла. Ровно та же логика, что в журнале
+    эволюции (evolution_log.load_records).
+    """
     meta_path = candidate_dir / META_FILE
     if not meta_path.exists():
         return {}
-    return json.loads(meta_path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{meta_path} не разбирается как JSON: {e}") from e
 
 
 def _write_meta(candidate_dir: Path, meta: dict) -> None:

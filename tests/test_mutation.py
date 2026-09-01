@@ -212,3 +212,14 @@ def test_ancestry_survives_cycle_between_two_candidates(tmp_path):
     meta["parent"] = second.name
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     assert ancestry(second) == ["gen002-a", "gen001-a"]
+
+
+def test_broken_meta_json_names_the_file(tmp_path):
+    """Битый meta.json — обычная порча артефакта на диске, а не сбой кода:
+    ошибка должна называть файл, как это делает журнал эволюции."""
+    candidate_dir = tmp_path / "gen001-a"
+    candidate_dir.mkdir()
+    (candidate_dir / "meta.json").write_text("{не json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="meta.json"):
+        ancestry(candidate_dir)
