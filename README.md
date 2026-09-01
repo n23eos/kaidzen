@@ -119,7 +119,7 @@ evolve/             Level 2 runs        (gitignored)
 docs/specs/         specs
 docs/superpowers/   implementation plans
 scripts/            one-off utility scripts
-tests/              501 tests
+tests/              506 tests
 ```
 
 Note: the role prompts, specs, and benchmark ideas are written in Russian — that's the language the system has been developed and evaluated in.
