@@ -23,7 +23,7 @@ from kaidzen.backends.base import BackendError
 from kaidzen.backends.registry import build_backends
 from kaidzen.benchmark import Benchmark, BenchmarkEmpty, load_benchmark
 from kaidzen.candidate import (CHAMPION_PREFIX, REPORTER_ROLE, Candidate,
-                               backends_by_role, load_candidate)
+                               LoopConfig, backends_by_role, load_candidate)
 from kaidzen.checkpoint import NO_DATA, pending_checkpoint
 from kaidzen.evolve import (EVAL_CONCURRENCY, MAX_GENERATIONS,
                             STOP_CHECKPOINT_REJECTED, SUMMARY_FILE,
@@ -128,10 +128,18 @@ def _resume_candidate_dir(saved: RunState) -> Path:
 
 
 def apply_max_iter(candidate: Candidate, max_iter: int | None) -> Candidate:
-    """Новый кандидат с изменённым лимитом итераций (исходный не меняем)."""
+    """Новый кандидат с изменённым лимитом итераций (исходный не меняем).
+
+    Лимит собирается через валидацию, а не через model_copy: model_copy границы
+    поля не проверяет, и --max-iter 0 или --max-iter 999 молча прошёл бы мимо
+    LoopConfig. Прогон при этом стартует, снапшот с чужим числом уезжает в
+    state.json, а resume падает на _loop_from_state — то есть оплаченный прогон
+    оказывается непродолжаемым. Отказ на старте дешевле.
+    """
     if max_iter is None:
         return candidate
-    loop = candidate.config.loop.model_copy(update={"max_iterations": max_iter})
+    loop = LoopConfig.model_validate(
+        {**candidate.config.loop.model_dump(), "max_iterations": max_iter})
     config = candidate.config.model_copy(update={"loop": loop})
     return candidate.model_copy(update={"config": config})
 

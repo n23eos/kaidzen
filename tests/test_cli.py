@@ -1029,3 +1029,12 @@ def test_main_makes_stdout_line_buffered(monkeypatch, capsys):
     monkeypatch.setitem(cli.COMMANDS, "report", lambda args: None)
     cli.main(["report", "любой"])
     assert calls and calls[0].get("line_buffering") is True
+
+
+@pytest.mark.parametrize("bad", [0, -1, 999])
+def test_apply_max_iter_rejects_values_outside_loop_limits(candidate, bad):
+    """--max-iter обязан проходить те же границы, что и config.yaml:
+    иначе прогон стартует, а его state.json потом не проходит валидацию
+    при resume (orchestrator._loop_from_state)."""
+    with pytest.raises(ValueError):
+        cli.apply_max_iter(candidate, bad)
