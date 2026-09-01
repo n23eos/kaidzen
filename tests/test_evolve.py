@@ -644,3 +644,26 @@ def test_delta_without_metrics_is_empty():
     """Кандидат без единого успешного прогона не даёт дельт, а не нулевые."""
     assert evolve_memory.metrics_delta(None, RunMetrics()) == {}
     assert evolve_memory.metrics_delta(RunMetrics(), None) == {}
+
+
+def test_resume_lifts_the_soft_stop(tmp_path):
+    """Мягкая остановка одноразовая.
+
+    Флаг STOP лежит на диске, а отметка о нём — в state.json, и оба
+    переживают перезапуск. Если evolve-resume их не снимает, он упирается
+    в остановку, заказанную в прошлый раз, и прогон нельзя продолжить
+    вообще — при том, что evolve-stop сам предлагает продолжить позже.
+    """
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(comparison="challenger"), FakePipeline())
+    request_stop(env.evolve_dir)
+
+    stopped = start(ctx, env, generations=2)
+    assert stopped.stop_reason == STOP_REQUESTED
+    assert stopped.generation == 0
+
+    resumed = run_evolve(ctx, resume=True)
+    assert resumed.generation == 2          # оба заказанных поколения прошли
+    assert resumed.stop_reason == STOP_MAX_GENERATIONS
+    assert resumed.stop_requested is False
+    assert not (env.evolve_dir / evolve.STOP_FILE).exists()

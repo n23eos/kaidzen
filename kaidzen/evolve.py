@@ -231,6 +231,8 @@ def run_evolve(ctx: EvolveContext, *, resume: bool = False,
     state = (load_evolve_state(ctx.evolve_dir) if resume
              else _new_state(ctx, champion_dir, evolve_id, max_generations,
                              checkpoint_every))
+    if resume:
+        _clear_stop_request(ctx, state)
     _refuse_while_checkpoint_pending(state)
     state.stop_reason = None
     while True:
@@ -246,6 +248,18 @@ def run_evolve(ctx: EvolveContext, *, resume: bool = False,
 def request_stop(evolve_dir: Path) -> None:
     """Мягкая остановка: поколение в работе дозавершается, новое не начнётся."""
     write_atomically(evolve_dir / STOP_FILE, "stop\n")
+
+
+def _clear_stop_request(ctx: EvolveContext, state: EvolveState) -> None:
+    """Мягкая остановка одноразовая: продолжение снимает её.
+
+    Флаг STOP и отметка в state.json переживают перезапуск, поэтому без явного
+    снятия evolve-resume упирался бы в остановку, заказанную в прошлый раз, и
+    прогон нельзя было бы продолжить вообще. Сама evolve-stop именно продолжение
+    и предлагает.
+    """
+    (ctx.evolve_dir / STOP_FILE).unlink(missing_ok=True)
+    state.stop_requested = False
 
 
 def approve_checkpoint(evolve_dir: Path) -> CheckpointRecord:
