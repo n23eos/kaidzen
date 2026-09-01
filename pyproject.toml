@@ -6,7 +6,10 @@ license = "MIT"
 requires-python = ">=3.12"
 # anyio объявлен явно: backends/claude_agent.py импортирует его напрямую
 # (синхронный мост к асинхронному query), а не получает как транзитивный
-dependencies = ["anthropic>=0.40", "anyio>=4.0", "claude-agent-sdk>=0.2.128",
+# нижняя граница anthropic — 0.120: бэкенд передаёт output_config (глубина
+# работы модели) и web_search_20260209, а в 0.40 ни того, ни другого нет —
+# заявленная граница обещала установку, которая не смогла бы сделать ни вызова
+dependencies = ["anthropic>=0.120", "anyio>=4.0", "claude-agent-sdk>=0.2.128",
                 "openai>=1.40", "pydantic>=2.7", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
