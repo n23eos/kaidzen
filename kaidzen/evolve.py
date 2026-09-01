@@ -672,9 +672,21 @@ def _run_pool(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
 
 def _keep(ctx: EvolveContext, state: EvolveState, record: CandidateRecord,
           run: EvalRun) -> None:
-    """Готовый прогон в запись кандидата, в кэш и в прогресс — одним местом."""
+    """Готовый прогон в запись кандидата, в кэш и в прогресс — одним местом.
+
+    В кэш идут только удавшиеся прогоны. Кэш переживает запись кандидата: по
+    нему челленджер, ставший чемпионом, получает свои прогоны в следующем
+    поколении, и по нему же чемпион не гоняется дважды на holdout. Упавший
+    прогон — это не результат, а его отсутствие (сеть легла, квота кончилась,
+    бэкенд ответил пятисоткой), и наследовать его новой записи нельзя: одна
+    случайная ошибка выбивала идею из сравнения на всё поколение вперёд.
+
+    В record.runs падение остаётся: по нему считается FAILURE_LIMIT и видно,
+    на чём прогон споткнулся.
+    """
     record.runs.append(run)
-    state.cache[_cache_key(record.candidate_id, Path(run.idea))] = run
+    if run.ok:
+        state.cache[_cache_key(record.candidate_id, Path(run.idea))] = run
     _event(ctx, f"{record.candidate_id} / {Path(run.idea).name}: "
                 f"{'готово' if run.ok else 'ошибка ' + run.error}")
     _save(ctx, state)

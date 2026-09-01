@@ -715,3 +715,30 @@ def test_resume_lifts_the_soft_stop(tmp_path):
     assert resumed.stop_reason == STOP_MAX_GENERATIONS
     assert resumed.stop_requested is False
     assert not (env.evolve_dir / evolve.STOP_FILE).exists()
+
+
+def test_failed_run_does_not_land_in_the_shared_cache(tmp_path):
+    """Упавший прогон — не результат, а его отсутствие.
+
+    Кэш переживает запись кандидата: по нему челленджер, ставший чемпионом,
+    получает свои прогоны в следующем поколении. Пока падение лежало в кэше,
+    оно наследовалось новой записью как готовый прогон, и одна случайная
+    сетевая ошибка выбивала идею из сравнения на всё поколение вперёд.
+    """
+    env = make_env(tmp_path)
+    ctx = make_ctx(env, FakeMeta(), FakePipeline())
+    state = evolve.EvolveState(evolve_id="e1", domain=DOMAIN,
+                               champion_id=CHAMPION_ID,
+                               champion_dir=str(env.champion_dir))
+    record = evolve.CandidateRecord(candidate_id=CHAMPION_ID,
+                                    candidate_dir=str(env.champion_dir))
+
+    evolve._keep(ctx, state, record,
+                 evolve.EvalRun(candidate_id=CHAMPION_ID, idea="a.md",
+                                run_dir="runs/a", ok=False, error="бэкенд лёг"))
+    evolve._keep(ctx, state, record,
+                 evolve.EvalRun(candidate_id=CHAMPION_ID, idea="b.md",
+                                run_dir="runs/b"))
+
+    assert len(record.runs) == 2                     # в отчёт падение попадает
+    assert list(state.cache) == [evolve._cache_key(CHAMPION_ID, Path("b.md"))]
