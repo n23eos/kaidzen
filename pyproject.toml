@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Polish a raw idea with facts from web search — and evolve the instructions that drive the polishing"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = ["anthropic>=0.40", "claude-agent-sdk>=0.2.128", "openai>=1.40",
-                "pydantic>=2.7", "pyyaml>=6.0"]
+# anyio объявлен явно: backends/claude_agent.py импортирует его напрямую
+# (синхронный мост к асинхронному query), а не получает как транзитивный
+dependencies = ["anthropic>=0.40", "anyio>=4.0", "claude-agent-sdk>=0.2.128",
+                "openai>=1.40", "pydantic>=2.7", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0"]
