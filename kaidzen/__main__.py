@@ -100,6 +100,24 @@ def make_evolve_dir(*, evolve_root: Path, domain: str, now_str: str) -> Path:
     return evolve_root / f"{now_str}-{domain}"
 
 
+def positive_int(value: str) -> int:
+    """Тип argparse для лимитов, у которых ноль означает опечатку.
+
+    Без проверки `--generations 0` тихо завершал команду, ничего не сделав, а
+    `--concurrency 0` так же тихо подменялся единицей внутри пула: пользователь
+    видел не отказ, а странно отработавший прогон.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"нужно целое число, получено {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"нужно число больше нуля, получено {number}")
+    return number
+
+
 def slugify(text: str) -> str:
     """Нижний регистр, любые не-буквенно-цифровые серии — в один дефис."""
     slug = re.sub(r"[\W_]+", "-", text.lower(), flags=re.UNICODE).strip("-")
@@ -599,9 +617,11 @@ def _add_evolve_commands(sub) -> None:
         "evolve", help="Эволюционировать кандидатов домена на бенчмарке.")
     evolve.add_argument("--domain", choices=DOMAINS, default=DEFAULT_DOMAIN,
                         help="Домен: из него берутся чемпион и идеи бенчмарка.")
-    evolve.add_argument("--generations", type=int, default=MAX_GENERATIONS,
+    evolve.add_argument("--generations", type=positive_int,
+                        default=MAX_GENERATIONS,
                         help="Сколько поколений прогнать максимум.")
-    evolve.add_argument("--concurrency", type=int, default=EVAL_CONCURRENCY,
+    evolve.add_argument("--concurrency", type=positive_int,
+                        default=EVAL_CONCURRENCY,
                         help="Сколько eval-прогонов идут параллельно.")
 
     resume = sub.add_parser("evolve-resume",

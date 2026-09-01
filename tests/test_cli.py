@@ -1038,3 +1038,16 @@ def test_apply_max_iter_rejects_values_outside_loop_limits(candidate, bad):
     при resume (orchestrator._loop_from_state)."""
     with pytest.raises(ValueError):
         cli.apply_max_iter(candidate, bad)
+
+
+@pytest.mark.parametrize("flag,value", [("--generations", "0"),
+                                        ("--generations", "-1"),
+                                        ("--concurrency", "0"),
+                                        ("--concurrency", "-2"),
+                                        ("--concurrency", "два")])
+def test_evolve_rejects_non_positive_limits(flag, value):
+    """Ноль поколений — это не «прогон без поколений», а опечатка: без отказа
+    команда молча завершается, ничего не сделав. Ноль параллельных прогонов
+    так же молча подменялся единицей."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["evolve", flag, value])
