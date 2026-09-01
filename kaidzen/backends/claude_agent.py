@@ -9,12 +9,12 @@ from __future__ import annotations
 from typing import Any, Type, TypeVar
 
 import anyio
-from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, query
 from pydantic import BaseModel, ValidationError
 
 from kaidzen.backends.base import (DEFAULT_MAX_SEARCHES, DEFAULT_MAX_TOKENS,
-                                   MAX_SCHEMA_RETRIES, LLMBackend,
-                                   SchemaValidationFailure)
+                                   MAX_SCHEMA_RETRIES, BackendError,
+                                   LLMBackend, SchemaValidationFailure)
 from kaidzen.backends.json_extract import (JsonExtractionError,
                                            extract_json_object)
 
@@ -91,8 +91,19 @@ class ClaudeAgentBackend(LLMBackend):
                                   max_turns=turns)
 
     def _ask(self, prompt: str, options: ClaudeAgentOptions) -> tuple[str, int]:
-        """Синхронный мост к асинхронному query(): текст ответа и число поисков."""
-        return anyio.run(self._stream, prompt, options)
+        """Синхронный мост к асинхронному query(): текст ответа и число поисков.
+
+        Ошибки SDK переводятся в BackendError: истёкшая сессия, отсутствующий
+        `claude` в PATH и упавший процесс — это состояние окружения, а не сбой
+        кода, и пользователь должен увидеть строку с подсказкой, а не трейсбек
+        с внутренностями asyncio. Поймано живым прогоном на истёкшем OAuth.
+        """
+        try:
+            return anyio.run(self._stream, prompt, options)
+        except ClaudeSDKError as e:
+            raise BackendError(
+                f"бэкенд подписки не смог выполнить запрос: {e}. Проверьте, "
+                f"что CLI claude установлен и сессия жива (claude login)") from e
 
     async def _stream(self, prompt: str,
                       options: ClaudeAgentOptions) -> tuple[str, int]:

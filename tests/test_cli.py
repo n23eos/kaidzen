@@ -10,6 +10,7 @@ import pytest
 import sys
 
 from kaidzen import __main__ as cli
+from kaidzen.backends.base import BackendError
 from kaidzen.benchmark import Benchmark
 from kaidzen.checkpoint import STATUS_APPROVED, CheckpointRecord
 from kaidzen.evolve import (EVAL_CONCURRENCY, MAX_GENERATIONS,
@@ -1064,3 +1065,21 @@ def test_champion_pointer_must_name_a_folder_not_a_path(tmp_path, name):
 
     with pytest.raises(ValueError, match="имя каталога"):
         cli.resolve_candidate_dir(candidates_root=root, domain="generic")
+
+
+def test_main_reports_backend_error_without_traceback(monkeypatch, capsys):
+    """Сбой транспорта посреди прогона — состояние окружения, а не сбой кода.
+
+    Прогон к этому моменту уже сохранён после последнего завершённого шага,
+    поэтому пользователю нужна строка с причиной и подсказка про resume, а не
+    двадцать строк трейсбека.
+    """
+    def boom(_args):
+        raise BackendError("бэкенд подписки не смог выполнить запрос")
+
+    monkeypatch.setitem(cli.COMMANDS, "report", boom)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["report", "runs/x"])
+
+    assert "бэкенд подписки" in str(exc.value)

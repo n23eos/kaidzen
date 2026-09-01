@@ -3,7 +3,8 @@ import pytest
 from pydantic import BaseModel
 
 from kaidzen.backends import claude_agent
-from kaidzen.backends.base import SchemaValidationFailure, SearchNotPerformed
+from kaidzen.backends.base import (BackendError, SchemaValidationFailure,
+                                   SearchNotPerformed)
 from kaidzen.backends.claude_agent import ClaudeAgentBackend
 
 
@@ -164,3 +165,25 @@ def test_prose_only_answer_fails_as_schema_failure(monkeypatch):
     with pytest.raises(SchemaValidationFailure):
         call(backend)
     assert len(calls) == 2
+
+
+def test_sdk_error_becomes_a_readable_backend_error(monkeypatch):
+    """Истёкшая сессия claude — обычная ошибка окружения, а не сбой кода.
+
+    Поймано живым прогоном: SDK бросает ResultError, CLI его не ловит, и
+    пользователь вместо «выполните claude login» получает трейсбек на
+    двадцать строк с внутренностями asyncio.
+    """
+    from claude_agent_sdk import ClaudeSDKError
+
+    def boom(*args, **kwargs):
+        # ResultError в старых версиях SDK не экспортируется, поэтому ловим и
+        # проверяем общий базовый класс — он есть во всех
+        raise ClaudeSDKError("Failed to authenticate: OAuth session expired")
+
+    monkeypatch.setattr(claude_agent.anyio, "run", boom)
+
+    with pytest.raises(BackendError, match="подписк"):
+        ClaudeAgentBackend().structured(
+            model="claude-sonnet-5", system="s", user="u", schema=Out,
+            effort="low")

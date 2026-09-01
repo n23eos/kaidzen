@@ -667,6 +667,11 @@ def main(argv: list[str] | None = None) -> None:
     except (FileNotFoundError, ValueError) as e:
         # ожидаемые ошибки пользователя: нет файла, битый конфиг, пустой указатель
         sys.exit(str(e))
+    except BackendError as e:
+        # сбой транспорта уже посреди прогона: истёкшая сессия, упавший CLI.
+        # Состояние сохранено после последнего завершённого шага, поэтому
+        # нужна причина и подсказка про resume, а не трейсбек
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":
