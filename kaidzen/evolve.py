@@ -721,7 +721,7 @@ def _write_eval_report(state: RunState, run_dir: Path) -> None:
     модели, и ради неё гонять её на каждый eval-прогон не стоит.
     """
     report = build_report(state, summary_text=EVAL_SUMMARY_NOTE)
-    (run_dir / REPORT_FILE).write_text(report, encoding="utf-8")
+    write_atomically(run_dir / REPORT_FILE, report)
 
 
 def _eval_candidate(candidate_dir: Path) -> Candidate:

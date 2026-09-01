@@ -35,7 +35,8 @@ from kaidzen.orchestrator import (STEP_ANALYZER, STEP_JUDGE, STEP_REFINER,
                                   _loop_from_state, run_pipeline, total_usage)
 from kaidzen.report import build_report
 from kaidzen.roles.meta import MetaConfig, build_meta_backend
-from kaidzen.state import RunState, load_state, save_state
+from kaidzen.state import (RunState, load_state, save_state,
+                          write_atomically)
 
 # пересказ готового текста без домысливания
 SUMMARY_EFFORT = "low"
@@ -304,9 +305,14 @@ def _generate_summary(backends: dict, candidate: Candidate,
 
 
 def _write_report(state: RunState, run_dir: Path, summary_text: str) -> Path:
+    """Отчёт пишется так же атомарно, как состояние прогона.
+
+    Обрыв посреди записи оставлял бы наполовину записанный report.md поверх
+    прежнего — а команда report пересобирает его из state.json именно тогда,
+    когда с прогоном что-то пошло не так.
+    """
     report_path = run_dir / REPORT_FILENAME
-    report_path.write_text(build_report(state, summary_text=summary_text),
-                           encoding="utf-8")
+    write_atomically(report_path, build_report(state, summary_text=summary_text))
     return report_path
 
 
