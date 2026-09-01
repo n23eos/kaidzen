@@ -267,3 +267,11 @@ def test_empty_backends_section_rejected(tmp_path):
                                "backends: {}\n")
     with pytest.raises(ValueError, match="backends"):
         load_candidate(make_candidate(tmp_path, bad))
+
+
+def test_broken_yaml_reports_the_file_instead_of_traceback(tmp_path):
+    """CLI ловит ValueError и FileNotFoundError; yaml.YAMLError в этот список
+    не входил, и опечатка в отступе давала пользователю трейсбек."""
+    broken = "domain: тест\n  rubric: [\n"
+    with pytest.raises(ValueError, match="config.yaml"):
+        load_candidate(make_candidate(tmp_path, broken))

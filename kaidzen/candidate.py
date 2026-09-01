@@ -166,7 +166,13 @@ def load_candidate(path: Path) -> Candidate:
     config_path = path / "config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"нет config.yaml в {path}")
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        # main() ловит ValueError и FileNotFoundError; YAMLError мимо этого
+        # списка проходил трейсбеком, хотя опечатка в отступе — обычная
+        # ошибка пользователя, а не сбой программы
+        raise ValueError(f"{config_path} не разбирается как YAML: {e}") from e
     if not isinstance(data, dict):
         # пустой файл даёт None, список верхнего уровня — list;
         # без этой проверки пользователь получит невнятную ошибку pydantic
