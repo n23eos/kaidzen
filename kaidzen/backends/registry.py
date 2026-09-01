@@ -28,6 +28,13 @@ KNOWN_TYPES = tuple(BACKEND_CLASSES)
 ENV_FILE = ".env"
 COMMENT_PREFIX = "#"
 
+# Клиент OpenAI без base_url ходит в api.openai.com, поэтому пропущенный
+# base_url осмыслен только для самого OpenAI. С ключом другого провайдера это
+# молчаливая опечатка: прогон стартует и падает с 401 на пятой минуте.
+OPENAI_KEY_ENV = "OPENAI_API_KEY"
+BASE_URL_KEY = "base_url"
+API_KEY_ENV_KEY = "api_key_env"
+
 
 def build_backends(config: dict[str, Any],
                    project_root: Path | None = None) -> dict[str, LLMBackend]:
@@ -52,6 +59,9 @@ def _build_one(name: str, spec: Any, root: Path) -> LLMBackend:
     key = _require_key(name, spec, root)
     if kind == TYPE_ANTHROPIC:
         return AnthropicApiBackend(api_key=key)
+    problem = openai_compat_problem(name, spec)
+    if problem:
+        raise BackendError(problem)
     return OpenAICompatBackend(
         base_url=spec.get("base_url"), api_key=key,
         structured_mode=spec.get("structured_mode", MODE_JSON_SCHEMA))
@@ -67,6 +77,23 @@ def _require_key(name: str, spec: dict, root: Path) -> str:
             f"бэкенд '{name}': переменная {env_name} не задана или пуста "
             f"(окружение или файл {ENV_FILE} в корне проекта)")
     return key
+
+
+def openai_compat_problem(name: str, spec: dict) -> str | None:
+    """Текст проблемы конфигурации openai_compat или None.
+
+    Возвращает строку, а не бросает: загрузчик кандидата обязан упасть
+    ValueError (его ловит CLI), а сборщик бэкендов — BackendError. Проверка
+    при этом одна, и разъехаться этим двум местам не с чем.
+    """
+    if spec.get(BASE_URL_KEY):
+        return None
+    env_name = spec.get(API_KEY_ENV_KEY)
+    if not env_name or env_name == OPENAI_KEY_ENV:
+        return None
+    return (f"бэкенд '{name}': не задан '{BASE_URL_KEY}', поэтому запросы "
+            f"уйдут в api.openai.com, а ключ берётся из {env_name}. Укажите "
+            f"{BASE_URL_KEY} провайдера или используйте {OPENAI_KEY_ENV}.")
 
 
 def supports_web_search(backend_type: str) -> bool:

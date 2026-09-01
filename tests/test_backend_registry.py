@@ -88,3 +88,25 @@ def test_env_file_absent_is_not_an_error(tmp_path):
 def test_non_dict_backend_spec_rejected(tmp_path):
     with pytest.raises(BackendError, match="словарь"):
         build_backends({"backends": {"x": "subscription"}}, tmp_path)
+
+
+def test_openai_compat_without_base_url_needs_the_openai_key(tmp_path,
+                                                             monkeypatch):
+    """Без base_url клиент уходит в api.openai.com. Ключ другого провайдера
+    при забытом base_url — это 401 на пятой минуте вместо отказа на старте."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ключ")
+    config = {"backends": {"deepseek": {"type": "openai_compat",
+                                        "api_key_env": "DEEPSEEK_API_KEY"}}}
+
+    with pytest.raises(BackendError, match="base_url"):
+        build_backends(config, tmp_path)
+
+
+def test_openai_compat_without_base_url_is_fine_for_openai_itself(tmp_path,
+                                                                  monkeypatch):
+    """Сам OpenAI живёт по умолчанию — спека описывает его именно так."""
+    monkeypatch.setenv("OPENAI_API_KEY", "ключ")
+    config = {"backends": {"openai": {"type": "openai_compat",
+                                      "api_key_env": "OPENAI_API_KEY"}}}
+
+    assert "openai" in build_backends(config, tmp_path)

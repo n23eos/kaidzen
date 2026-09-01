@@ -104,6 +104,7 @@ def test_researcher_on_backend_without_web_search_rejected(tmp_path):
            .replace("  subscription: { type: claude_agent_sdk }",
                     "  subscription: { type: claude_agent_sdk }\n"
                     "  deepseek: { type: openai_compat, "
+                    "base_url: \"https://api.deepseek.com\", "
                     "api_key_env: DEEPSEEK_API_KEY }")
            .replace(role_line("researcher"),
                     role_line("researcher", "deepseek")))
@@ -122,6 +123,7 @@ def test_non_searching_backend_is_fine_for_other_roles(tmp_path):
           .replace("  subscription: { type: claude_agent_sdk }",
                    "  subscription: { type: claude_agent_sdk }\n"
                    "  deepseek: { type: openai_compat, "
+                   "base_url: \"https://api.deepseek.com\", "
                    "api_key_env: DEEPSEEK_API_KEY }")
           .replace(role_line("judge"), role_line("judge", "deepseek")))
 
@@ -275,3 +277,14 @@ def test_broken_yaml_reports_the_file_instead_of_traceback(tmp_path):
     broken = "domain: тест\n  rubric: [\n"
     with pytest.raises(ValueError, match="config.yaml"):
         load_candidate(make_candidate(tmp_path, broken))
+
+
+def test_openai_compat_without_base_url_and_foreign_key_rejected(tmp_path):
+    """Та же проверка, что в сборщике бэкендов, но на загрузке кандидата:
+    опечатка должна ронять конфиг, а не первый вызов модели."""
+    bad = VALID_CONFIG.replace(
+        "  subscription: { type: claude_agent_sdk }",
+        "  subscription: { type: claude_agent_sdk }\n"
+        "  deepseek: { type: openai_compat, api_key_env: DEEPSEEK_API_KEY }")
+    with pytest.raises(ValueError, match="base_url"):
+        load_candidate(make_candidate(tmp_path, bad))

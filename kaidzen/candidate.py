@@ -7,7 +7,10 @@ import yaml
 from pydantic import (BaseModel, ConfigDict, Field, field_validator,
                       model_validator)
 
-from kaidzen.backends.registry import KNOWN_TYPES, supports_web_search
+from kaidzen.backends.registry import (KNOWN_TYPES,
+                                       TYPE_OPENAI_COMPAT,
+                                       openai_compat_problem,
+                                       supports_web_search)
 
 ROLES = ("analyzer", "researcher", "refiner", "judge")
 # файл-указатель на кандидата-чемпиона домена: candidates/CHAMPION-<domain>.
@@ -102,7 +105,22 @@ class CandidateConfig(BaseModel):
             raise ValueError(
                 f"backends: неизвестный type у бэкендов {unknown}, "
                 f"допустимы {', '.join(KNOWN_TYPES)}")
+        cls._check_provider_addresses(v)
         return v
+
+    @staticmethod
+    def _check_provider_addresses(backends: dict[str, dict]) -> None:
+        """Адрес провайдера — той же функцией, что и у сборщика бэкендов.
+
+        Две точки проверки (конфиг и сборка) на одной реализации: разъехаться
+        им не с чем, а падать конфиг обязан раньше — на загрузке кандидата.
+        """
+        problems = [openai_compat_problem(name, spec)
+                    for name, spec in backends.items()
+                    if spec.get(BACKEND_TYPE_KEY) == TYPE_OPENAI_COMPAT]
+        found = [p for p in problems if p]
+        if found:
+            raise ValueError("; ".join(found))
 
     @model_validator(mode="after")
     def check_roles(self) -> "CandidateConfig":
